@@ -12,7 +12,7 @@ import { registerTools } from "./tools.js";
 import { log } from "./logger.js";
 
 const NAME = "zcode-orchestra";
-const VERSION = "1.3.0";
+const VERSION = "1.3.1";
 const BODY_LIMIT = 10 * 1024 * 1024; // 10 МБ на JSON-RPC запрос
 
 function createMcpServer(config: OrchestraConfig, runner: Runner, user: UserConfig, accounts: AccountManager, binder: NotifyBinder, scheduler: ClaimScheduler): McpServer {
@@ -161,8 +161,9 @@ async function main(): Promise<void> {
 
   const runner = new Runner(config); // поднимает dataDir и подгружает jobs.json
   const accounts = new AccountManager();
-  const binder = new NotifyBinder(config);
   const scheduler = new ClaimScheduler(config, runner);
+  const binder = new NotifyBinder(config, accounts, scheduler);
+  binder.start();
   scheduler.start();
   log(`транспорт: ${config.transport}, порт ${config.port}, параллелизм ${config.maxParallel}, аккаунты: ${config.accounts.map((a) => a.name).join(", ")}`);
   log(`пользователи: ${config.users.map((u) => `${u.name}(${u.accounts.join("/")}${u.chatId ? `, tg:${u.chatId}` : ""})`).join(", ")}`);

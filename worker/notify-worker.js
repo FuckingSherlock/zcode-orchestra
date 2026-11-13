@@ -27,9 +27,11 @@ function jsonResp(obj, status = 200) {
 }
 
 /**
- * Обновить буфер из getUpdates и поискать код.
+ * Обновить буфер из getUpdates; найти код (если задан) и собрать слэш-команды.
  * getUpdates подтверждает апдейты офсетом, поэтому неподхваченное для ОДНОГО
  * оркестра сообщение остаётся в буфере и ждёт своего кода (бот один на всех).
+ * Команды ("/...") не выкусываются из буфера — их забирает оркестр-владелец
+ * чата и подтверждает через /tg-ack.
  */
 async function tgWaitForCode(env, code) {
   const now = Date.now();
@@ -60,9 +62,16 @@ async function tgWaitForCode(env, code) {
     // сеть/409 от параллельного getUpdates — код останется в буфере, следующий тик добьёт
   }
   tgBuf = tgBuf.slice(-TG_BUFFER_CAP);
+
+  // слэш-команды — для оркестров (владелец чата ответит и подтвердит через /tg-ack)
+  const commands = tgBuf
+    .filter((m) => m.text.startsWith("/"))
+    .map((m) => ({ chatId: m.chatId, messageId: m.messageId, text: m.text, from: m.from }));
+
+  if (!code) return { found: false, commands };
   const norm = String(code).toUpperCase();
   const idx = tgBuf.findIndex((m) => m.text.toUpperCase().includes(norm));
-  if (idx === -1) return { found: false };
+  if (idx === -1) return { found: false, commands };
   const m = tgBuf[idx];
   tgBuf.splice(idx, 1);
   // лучшее усилие: стереть сообщение с кодом из чата (боты умеют удалять в ЛС)
@@ -75,7 +84,7 @@ async function tgWaitForCode(env, code) {
   } catch {
     // не критично
   }
-  return { found: true, chatId: m.chatId, from: m.from };
+  return { found: true, chatId: m.chatId, from: m.from, commands };
 }
 
 export default {
@@ -101,15 +110,31 @@ export default {
 
     const path = new URL(request.url).pathname;
 
-    // привязка по одноразовому коду: {code} → {found, chatId?, from?}
+    // привязка по одноразовому коду + выдача слэш-команд: {code?} → {found, chatId?, commands[]}
     if (path === "/tg-wait") {
-      if (!body.code || typeof body.code !== "string") {
-        return jsonResp({ ok: false, error: "code required" }, 400);
-      }
       if (!env.TG_BOT_TOKEN) {
         return jsonResp({ ok: false, error: "TG_BOT_TOKEN not configured" }, 500);
       }
-      return jsonResp(await tgWaitForCode(env, body.code));
+      return jsonResp(await tgWaitForCode(env, typeof body.code === "string" && body.code !== "" ? body.code : undefined));
+    }
+
+    // оркестр обработал команду: удалить её из чата и буфера {chatId, messageId}
+    if (path === "/tg-ack") {
+      const { chatId, messageId } = body;
+      if (!chatId || !messageId) {
+        return jsonResp({ ok: false, error: "chatId and messageId required" }, 400);
+      }
+      tgBuf = tgBuf.filter((m) => !(m.chatId === chatId && m.messageId === messageId));
+      try {
+        await fetch(`https://api.telegram.org/bot${env.TG_BOT_TOKEN}/deleteMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chat_id: chatId, message_id: messageId }),
+        });
+      } catch {
+        // не критично
+      }
+      return jsonResp({ ok: true });
     }
 
     // отправка уведомления: {chatId, text} → sendMessage

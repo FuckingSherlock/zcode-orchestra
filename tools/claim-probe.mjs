@@ -38,7 +38,10 @@ const secretFile = arg("--secret-file");
 const appVersion = arg("--app-version", "3.18.1");
 const claimPlanId = arg("--claim");
 const doEvents = has("--events");
+const doMarketing = has("--mt");
 const origin = arg("--origin", "https://zcode.z.ai");
+const platformOverride = arg("--platform");
+const langOverride = arg("--lang", "ru-RU");
 
 if (!credentialsPath || !existsSync(credentialsPath)) {
   console.error("укажи --credentials <путь к credentials.json>");
@@ -142,7 +145,7 @@ try {
   if (existsSync(telePath)) deviceMid = JSON.parse(readFileSync(telePath, "utf8")).deviceMid ?? "";
 } catch { /* необязательно */ }
 
-const platformKey = osPlatform() === "win32" ? "win32-x64" : osPlatform() === "darwin" ? "darwin-arm64" : "linux-x64";
+const platformKey = platformOverride ?? (osPlatform() === "win32" ? "win32-x64" : osPlatform() === "darwin" ? "darwin-arm64" : "linux-x64");
 const headers = {
   "Authorization": `Bearer ${jwt}`,
   "User-Agent": `ZCode/${appVersion}`,
@@ -151,7 +154,7 @@ const headers = {
   "X-ZCode-App-Version": appVersion,
   "X-Platform": platformKey,
   "X-Release-Channel": "1",
-  "X-Client-Language": "ru-RU",
+  "X-Client-Language": langOverride,
   "X-Client-Timezone": Intl.DateTimeFormat().resolvedOptions().timeZone,
   "X-Os-Category": osPlatform(),
   "x-request-id": randomUUID(),
@@ -198,12 +201,34 @@ if (has("--configs")) {
   console.error("[configs] GET /api/v1/client/configs");
   const cfg = await api("GET", "/api/v1/client/configs");
   console.log("configs HTTP", cfg.status);
-  const s = JSON.stringify(cfg.json ?? cfg.text.slice(0, 2000));
-  console.log("секции:", Object.keys(cfg.json?.data ?? cfg.json ?? {}).join(", ").slice(0, 600));
-  for (const kw of ["start_plan", "claim", "weekend", "marketing", "activity", "preview", "captcha"]) {
-    let i = s.toLowerCase().indexOf(kw);
-    if (i >= 0) console.log(`  [${kw}]`, s.slice(Math.max(0, i - 80), i + 160));
+  const data = cfg.json?.data ?? {};
+  console.log("секции:", Object.keys(data).join(", ").slice(0, 600));
+  const inner = data.configs ?? {};
+  console.log("внутри configs:", Object.keys(inner).join(", ").slice(0, 800));
+  if (inner.startPlanPreview !== undefined) {
+    console.log("--- startPlanPreview ---");
+    console.log(JSON.stringify(inner.startPlanPreview, null, 1).slice(0, 2000));
   }
+  for (const k of Object.keys(inner)) {
+    if (/claim|activity|promo|weekend|manual|billing/i.test(k)) {
+      console.log(`--- configs.${k} ---`);
+      console.log(JSON.stringify(inner[k], null, 1).slice(0, 1200));
+    }
+  }
+  const s = JSON.stringify(cfg.json ?? {});
+  for (const kw of ["weekend", "manual_claim", "claimable"]) {
+    let i = s.toLowerCase().indexOf(kw);
+    if (i >= 0) console.log(`  [${kw}]`, s.slice(Math.max(0, i - 100), i + 200));
+  }
+}
+
+// ---------- 1c) marketing/touch (кампании — источник карточки активности) ----------
+if (doMarketing) {
+  console.error("[mt] GET /api/v1/marketing/touch?seq=1");
+  const mt = await api("GET", "/api/v1/marketing/touch?seq=1");
+  console.log("marketing/touch HTTP", mt.status);
+  const s = JSON.stringify(mt.json ?? mt.text.slice(0, 800));
+  console.log(s.length > 4000 ? s.slice(0, 4000) + "…" : s);
 }
 
 // ---------- 2) claim без капчи ----------

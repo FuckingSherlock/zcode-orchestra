@@ -68,9 +68,21 @@ function b64urlDecode(s) {
 }
 
 function decryptEncV1(value, secret) {
-  // v1: "enc:v1:nonce.tag.ct"; v2: "enc:v2:env:nonce.tag.ct" / "enc:v2:os:…"
-  // (v2 из бандла рантайма: тот же AES-256-GCM, ключ = sha256(секрет-файл как есть))
-  const body = value.replace(/^enc:v[12]:(?:env|os):?/, "");
+  // v1: "enc:v1:nonce.tag.ct" — ключ = sha256(fallback-secret)
+  // v2: "enc:v2:<env|os>:<keyid>:<nonce.tag.ct>" — keyid = sha256(key).hex.slice(0,24) (самопроверка),
+  //     ключ = sha256(содержимое секрет-файла как есть) для env; os — из keyring (не поддерживаем)
+  let body = value;
+  if (body.startsWith("enc:v2:")) {
+    const m = body.match(/^enc:v2:(env|os):([0-9a-f]{24}):(.+)$/s);
+    if (!m) throw new Error("не удалось разобрать enc:v2 формат");
+    if (m[1] === "os") throw new Error("enc:v2:os требует OS keyring — не поддерживается зондом");
+    const key = createHash("sha256").update(secret, "utf8").digest();
+    const keyid = key.toString("hex").slice(0, 24);
+    if (keyid !== m[2]) throw new Error(`keyid не совпал: файл ${m[2]}, наш ${keyid} — не тот секрет?`);
+    body = m[3];
+  } else {
+    body = body.replace(/^enc:v1:/, "");
+  }
   const [nB64, tB64, cB64] = body.split(".");
   const nonce = b64urlDecode(nB64);
   const tag = b64urlDecode(tB64);

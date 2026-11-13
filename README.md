@@ -40,7 +40,29 @@ docker compose exec zcode-orchestra zcode login --oauth --no-browser
 > ```
 > Секрет нужно сохранить отдельно: без него после утери volume креды не расшифровать.
 
-> Если в вашем окружении официальное хранилище зашифровано (`enc:v1:` в credentials.json), тулза `claim_credits` честно вернёт ошибку — расшифровка official runtime'а не реализуется, выполните клейм вручную через браузер z.ai.
+## Клейм бесплатных кредитов (claim_credits)
+
+Тулза `claim_credits` выполняет полный цикл в отдельном child-процессе (`dist/claim-cli.js`, свои 512МБ heap):
+
+1. расшифровка JWT из `credentials.json` (`enc:v1`/`enc:v2:env` — формат реверсирован из официального рантайма; секрет — `ZCODE_CREDENTIAL_SECRET_FILE`);
+2. события активации `app_launch`/`app_daily_active` (триггерят выдачу Start Plan);
+3. детект клеймящихся активностей (`billing/preview`);
+4. **минт Aliyun traceless-капчи** — вендоред happy-dom-солвер ([TriDefender/zcode-api](https://github.com/TriDefender/zcode-api), CC BY-NC-SA 4.0 — см. [NOTICE.md](NOTICE.md)); без браузера, ~5-10с на решение, ретрай-лесенка с классификацией ошибок (F008/IP-блок — фатальны, сталь/таймаут — ретраятся);
+5. `POST billing/claim` с заголовками `X-Aliyun-Captcha-Verify-Param`/`-Region` (повтор со свежим минтом при 3007);
+6. статус квоты (`billing/current`, фолбэк `billing/balance`).
+
+Ручной прогон внутри контейнера (учётка уже залогинена):
+
+```bash
+docker compose exec zcode-orchestra node dist/claim-cli.js --credentials /root/.zcode/v2/credentials.json            # статус: preview + квота
+docker compose exec zcode-orchestra node dist/claim-cli.js --credentials /root/.zcode/v2/credentials.json --claim    # клейм (авто-выбор активности)
+docker compose exec zcode-orchestra node dist/claim-cli.js --credentials /root/.zcode/v2/credentials.json --claim zcode-v3-start-plan-1113-wk  # конкретный plan_id
+node dist/claim-cli.js --mint-only   # смоук солвера без кредов (можно локально)
+```
+
+Коды отказа: `1005` — суточный слот исчерпан (уже клеймилось, NextAt = ends_at), `1002` — кампания завершена, `3006` — модель не разрешена, `3007` — капча отклонена (автоматически повторяется со свежим минтом).
+
+> `enc:v2:os` (keyring десктопа) не поддерживается — только файловый секрет (`enc:v1`/`enc:v2:env`), как в Docker.
 
 ## Подключение как MCP из ZCode Desktop
 
@@ -60,7 +82,7 @@ docker compose exec zcode-orchestra zcode login --oauth --no-browser
 | `zcode_jobs()` | Последние 20 задач из журнала, свежие первыми. |
 | `zcode_job_cancel(jobId)` | Отменить задачу (queued снимается с очереди, running → SIGTERM → SIGKILL через 10с). |
 | `account_status(account?)` | `{account, model, configuredFiles, activeJobs, stats:{done, failed}}`. |
-| `claim_credits(account?)` | **Experimental**: детект активностей (`billing/preview`), активация (`event/report`), статус квоты (`billing/current`) и клейм (`billing/claim`) через JWT аккаунта. Капча/anti-bot не автоматизированы — при верификации вернёт инструкцию на ручной клейм в браузере z.ai → страница активностей. |
+| `claim_credits(account?)` | Полный цикл клейма бесплатных кредитов: активация (`event/report`) → детект (`billing/preview`) → минт Aliyun-капчи (вендоред happy-dom-солвер, ~5-10с) → `billing/claim` с верификацией → квота (`billing/current`). Детали и коды отказа — секция «Клейм бесплатных кредитов» выше. |
 
 Типичный цикл оркестратора: `zcode_agent(brief=..., workdir="proj-a")` → `zcode_job_status(jobId)` → забрать `result`/`session_id` → продолжение сессии: `zcode_agent(brief="...", resume=<session_id>, workdir="proj-a")`.
 

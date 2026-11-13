@@ -59,7 +59,7 @@ try {
     action,
     credentialsPath: args.credentials,
     // без явного флага берём секрет из окружения (compose прокидывает в контейнер)
-    secretFile: args.secretFile ?? process.env.ZCODE_CREDENTIAL_SECRET_FILE || undefined,
+    secretFile: args.secretFile ?? (process.env.ZCODE_CREDENTIAL_SECRET_FILE || undefined),
     secretInline: args.secretInline,
     planId: args.claimPlanId,
     appVersion: args.appVersion,

@@ -64,6 +64,7 @@ interface JobRuntime {
   stderrTail: string;
   killed: boolean; // отменена пользователем/шатдауном
   finished: boolean;
+  counted: boolean; // учтена в this.active (декремент в терминальных состояниях)
   logStream: WriteStream | null;
   stderrMarked: boolean;
   waiters: Array<(r: JobRecord) => void>;
@@ -269,6 +270,7 @@ export class Runner {
           stderrTail: "",
           killed: false,
           finished: true,
+          counted: false,
           logStream: null,
           stderrMarked: false,
           waiters: [],
@@ -336,6 +338,7 @@ export class Runner {
       stderrTail: "",
       killed: false,
       finished: false,
+      counted: false,
       logStream: null,
       stderrMarked: false,
       waiters: [],
@@ -394,6 +397,7 @@ export class Runner {
   private async runJob(rt: JobRuntime): Promise<void> {
     const rec = rt.record;
     this.active++;
+    rt.counted = true;
     rec.status = "running";
     rec.startedAt = nowIso();
     this.schedulePersist();
@@ -448,6 +452,7 @@ export class Runner {
   private failJob(rt: JobRuntime, error: string): void {
     if (rt.finished) return;
     rt.finished = true;
+    this.releaseActive(rt);
     const rec = rt.record;
     rec.status = "failed";
     rec.error = error.slice(0, ERROR_SNIPPET);
@@ -462,6 +467,7 @@ export class Runner {
   private finishJob(rt: JobRuntime, code: number | null, signal: NodeJS.Signals | null): void {
     if (rt.finished) return;
     rt.finished = true;
+    this.releaseActive(rt);
     const rec = rt.record;
     rec.finishedAt = nowIso();
     rec.exitCode = code;
@@ -484,6 +490,14 @@ export class Runner {
     this.resolveWaiters(rt);
     log(`задача ${rec.jobId} ${rec.status} (exit ${code === null ? "-" : code})`);
     this.pump();
+  }
+
+  /** Снимает задачу со счётчика параллелизма (только если она реально стартовала) */
+  private releaseActive(rt: JobRuntime): void {
+    if (rt.counted) {
+      rt.counted = false;
+      this.active--;
+    }
   }
 
   private cleanupChild(rt: JobRuntime): void {

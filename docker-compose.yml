@@ -16,6 +16,8 @@ services:
       - ./.data/zcode-credential-secret:/run/secrets/zcode-credential-secret:ro
     environment:
       ZCODE_CREDENTIAL_SECRET_FILE: /run/secrets/zcode-credential-secret
+      # кап heap'а: наследуется спавнами zcode (2 параллельные задачи = до ~5 node-процессов)
+      NODE_OPTIONS: --max-old-space-size=224
     mem_limit: 1g
     restart: unless-stopped
     env_file: .env

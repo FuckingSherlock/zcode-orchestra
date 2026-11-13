@@ -16,8 +16,14 @@ import { log } from "./logger.js";
 const DAY_MS = 24 * 60 * 60 * 1000;
 const GENERIC_BACKOFF_MS = 10 * 60 * 1000; // лестница попыток: попытка — неудача — 10 мин
 const MAX_ATTEMPTS = 4;                    // максимум попыток клейма на план за цикл
+const MAX_EXHAUSTED_DAYS = 2;              // 2 дня подряд неудач → акк убираем из автоклейма
 const DISCOVERY_ERROR_NOTIFY_GAP_MS = 6 * 60 * 60 * 1000; // не спамим про сломанный discovery чаще 1 раза в 6ч
 const GATE_LOG_GAP_MS = 6 * 60 * 60 * 1000; // «до окна раздач» — не чаще раза в 6ч
+
+/** Текущая дата (или смещённая на offsetDays) в МСК в виде YYYY-MM-DD. */
+function mskDay(offsetDays = 0): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Moscow" }).format(new Date(Date.now() + offsetDays * DAY_MS));
+}
 
 export interface PlanState {
   result: "claimed" | "denied" | "error";
@@ -33,6 +39,11 @@ export interface AccountClaimState {
   plans: Record<string, PlanState>;
   lastDiscoveryErrorAt?: number;
   lastDiscoveryError?: string;
+  /** дней ПОДРЯД (MSK) с исчерпанными попытками клейма — 2 дня подряд → disabled */
+  exhaustedDays?: number;
+  lastExhaustedDay?: string;
+  /** аккаунт убран из автоклейма (возможен бан) — вердикт на усмотрение юзера, возврат: claim_enable */
+  disabled?: { at: number; reason: string };
 }
 
 interface ClaimState {
@@ -100,6 +111,17 @@ export class ClaimScheduler {
     return this.state.accounts[accName];
   }
 
+  /** Вернуть аккаунт в автоклейм после автоотключения и/или сбросить счётчики неудач. */
+  enableAccount(accName: string): void {
+    const st = this.state.accounts[accName];
+    if (!st) return;
+    st.disabled = undefined;
+    st.exhaustedDays = 0;
+    st.lastExhaustedDay = undefined;
+    this.saveState();
+    log(`автоклейм (${accName}): возвращён в планировщик (claim_enable)`);
+  }
+
   private scheduleNext(): void {
     this.timer = setTimeout(() => void this.runTick(), this.config.claimIntervalMs);
   }
@@ -164,6 +186,10 @@ export class ClaimScheduler {
       return;
     }
     const accState = this.state.accounts[acc.name] ?? emptyAccountState();
+    this.state.accounts[acc.name] = accState;
+
+    // автоотключение: 2 дня подряд исчерпанных попыток → акк больше не тикаем (возможен бан)
+    if (accState.disabled) return;
 
     // аккаунт без кредов (добавлен, OAuth не завершён) — discovery бесполезен
     const credsPath = acc.credentialsFile ?? join(homedir(), ".zcode", "v2", "credentials.json");
@@ -232,6 +258,27 @@ export class ClaimScheduler {
     this.state.accounts[acc.name] = accState;
     this.saveState();
     log(`автоклейм (${acc.name}): ${planId} → ${rec.result}${rec.code !== undefined ? ` (код ${rec.code})` : ""}${rec.lastMessage ? `: ${rec.lastMessage.slice(0, 200)}` : ""}`);
+
+    // исчерпание попыток (не 1005/1002 — те живут своими suppress-правилами): учёт дней подряд
+    if (rec.result !== "claimed" && rec.attempts >= MAX_ATTEMPTS && rec.code !== 1005 && rec.code !== 1002) {
+      const day = mskDay();
+      if (accState.lastExhaustedDay !== day) {
+        accState.exhaustedDays = accState.lastExhaustedDay === mskDay(-1) ? (accState.exhaustedDays ?? 0) + 1 : 1;
+        accState.lastExhaustedDay = day;
+      }
+      if ((accState.exhaustedDays ?? 0) >= MAX_EXHAUSTED_DAYS && !accState.disabled) {
+        const reason = `${accState.exhaustedDays} дня подряд неудачных циклов клейма — возможен бан аккаунта`;
+        accState.disabled = { at: Date.now(), reason };
+        this.saveState();
+        log(`автоклейм (${acc.name}): убран из планировщика — ${reason}`);
+        const whoLabel2 = claimRun.outcome?.whoami?.label;
+        const chat = acc.notifyChatId ?? owner.chatId;
+        if (chat !== undefined) {
+          await notify(chat, `🚫 Автоклейм отключён (акк ${acc.name}${whoLabel2 ? ` (${whoLabel2})` : ""})\n${reason}\nПроверьте аккаунт вручную; вернуть в автоклейм — тулза claim_enable.`);
+        }
+        return; // уведомление об исчерпании уже не нужно — есть финальное про отключение
+      }
+    }
 
     // 6. уведомление владельцу — с меткой И имени акка, И z.ai-аккаунта (кто именно заклеймил)
     const whoLabel = claimRun.outcome?.whoami?.label;

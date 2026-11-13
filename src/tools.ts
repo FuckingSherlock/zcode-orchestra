@@ -423,7 +423,29 @@ export function registerTools(server: McpServer, runner: Runner, config: Orchest
     },
   );
 
-  // 13. account_remove — удалить рантаймный аккаунт
+  // 13. claim_enable — вернуть аккаунт в автоклейм после автоотключения
+  server.registerTool(
+    "claim_enable",
+    {
+      title: "Вернуть аккаунт в автоклейм",
+      description:
+        "Аккаунт автоматически убирается из автоклейма после 2 дней подряд неудачных циклов клейма " +
+        "(подозрение на бан). Эта тулза сбрасывает счётчики и возвращает аккаунт в планировщик — " +
+        "вызывайте ПОСЛЕ ручной проверки, что аккаунт жив.",
+      inputSchema: accountParam,
+    },
+    async (args) => {
+      try {
+        const acc = findUserAccount(config, user, args.account);
+        scheduler.enableAccount(acc.name);
+        return asText({ ok: true, account: acc.name, enabled: true });
+      } catch (e) {
+        return asError(`claim_enable: ${errMsg(e)}`);
+      }
+    },
+  );
+
+  // 14. account_remove — удалить рантаймный аккаунт
   server.registerTool(
     "account_remove",
     {

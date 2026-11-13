@@ -78,6 +78,9 @@ export class NotifyBinder {
   private timer: NodeJS.Timeout | null = null;
   private polling = false;
   private lastErrorLogAt = 0;
+  /** messageId → время обработки: защита от повторных ответов (ack мог не попасть
+   *  в тот же изолят воркера, и команда придёт из буфера снова) — инвариант: один ответ на сообщение */
+  private processed = new Map<number, number>();
 
   constructor(
     private readonly config: OrchestraConfig,
@@ -166,8 +169,19 @@ export class NotifyBinder {
 
   /** Слэш-команды от привязанных чатов. Чужой chat id игнорируем (его оркестр сам разберёт). */
   private async handleCommand(cmd: TgCommand): Promise<void> {
+    const now = Date.now();
+    for (const [id, at] of this.processed) {
+      if (now - at > 20 * 60 * 1000) this.processed.delete(id);
+    }
     const user = this.config.users.find((u) => u.chatId === cmd.chatId);
     if (user === undefined) return; // чужой чат — не наш клиент
+    // Стоп-спам: каждое сообщение обрабатываем ровно один раз, даже если ack
+    // не вычистил буфер воркера (изолят-лотерея) и команда пришла снова.
+    if (this.processed.has(cmd.messageId)) {
+      await workerAck(cmd); // подчищаем буфер без повторного ответа
+      return;
+    }
+    this.processed.set(cmd.messageId, now);
     const text = cmd.text.trim().toLowerCase();
     try {
       if (/^\/(status|статус|account_list|accounts)/.test(text)) {

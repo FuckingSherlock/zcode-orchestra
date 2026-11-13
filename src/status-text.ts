@@ -31,6 +31,10 @@ export async function accountsStatusText(
     lines.push(`\n• ${acc.name}${zai}${auth}`);
 
     const st = scheduler.accountClaimState(acc.name);
+    if (st?.disabled) {
+      lines.push(`  🚫 убран из автоклейма: ${st.disabled.reason} (вернуть: claim_enable)`);
+      continue;
+    }
     const plans = Object.entries(st?.plans ?? {});
     if (st?.lastDiscoveryError) {
       lines.push(`  ⚠️ discovery: ${st.lastDiscoveryError.slice(0, 150)}`);

@@ -68,7 +68,9 @@ function b64urlDecode(s) {
 }
 
 function decryptEncV1(value, secret) {
-  const body = value.slice("enc:v1:".length);
+  // v1: "enc:v1:nonce.tag.ct"; v2: "enc:v2:env:nonce.tag.ct" / "enc:v2:os:…"
+  // (v2 из бандла рантайма: тот же AES-256-GCM, ключ = sha256(секрет-файл как есть))
+  const body = value.replace(/^enc:v[12]:(?:env|os):?/, "");
   const [nB64, tB64, cB64] = body.split(".");
   const nonce = b64urlDecode(nB64);
   const tag = b64urlDecode(tB64);
@@ -84,7 +86,7 @@ function decryptEncV1(value, secret) {
 function collectSecrets(obj, path = "", out = {}) {
   if (obj && typeof obj === "object") {
     for (const [k, v] of Object.entries(obj)) collectSecrets(v, path ? `${path}.${k}` : k, out);
-  } else if (typeof obj === "string" && obj.startsWith("enc:v1:")) {
+  } else if (typeof obj === "string" && /^enc:v[12]:(?:env|os)?:/.test(obj)) {
     out[path] = obj;
   }
   return out;
@@ -116,7 +118,7 @@ outer: for (const [key, enc] of Object.entries(encEntries)) {
 
 if (!jwt) {
   console.error("не удалось расшифровать zcodejwttoken; найдены зашифрованные поля:",
-    Object.keys(Object.fromEntries(Object.entries(encEntries).filter(([, v]) => typeof v === "string" && v.startsWith("enc:v1:")))));
+    Object.keys(Object.fromEntries(Object.entries(encEntries).filter(([, v]) => typeof v === "string" && /^enc:v/.test(v)))));
   process.exit(3);
 }
 console.error(`[ok] расшифрован ${jwtKey} (JWT ${jwt.length} симв., exp-поле не проверяем здесь)`);

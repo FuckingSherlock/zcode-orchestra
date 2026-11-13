@@ -193,9 +193,21 @@ if (preview.json) {
   console.log(preview.text.slice(0, 400));
 }
 
+// ---------- 1b) client/configs (источник карточек активностей) ----------
+if (has("--configs")) {
+  console.error("[configs] GET /api/v1/client/configs");
+  const cfg = await api("GET", "/api/v1/client/configs");
+  console.log("configs HTTP", cfg.status);
+  const s = JSON.stringify(cfg.json ?? cfg.text.slice(0, 2000));
+  console.log("секции:", Object.keys(cfg.json?.data ?? cfg.json ?? {}).join(", ").slice(0, 600));
+  for (const kw of ["start_plan", "claim", "weekend", "marketing", "activity", "preview", "captcha"]) {
+    let i = s.toLowerCase().indexOf(kw);
+    if (i >= 0) console.log(`  [${kw}]`, s.slice(Math.max(0, i - 80), i + 160));
+  }
+}
+
 // ---------- 2) claim без капчи ----------
-if (claimPlanId) {
-  console.error(`[claim] POST /api/v1/zcode-plan/billing/claim {plan_id: ${claimPlanId}} — без капча-заголовков`);
+if (claimPlanId) {  console.error(`[claim] POST /api/v1/zcode-plan/billing/claim {plan_id: ${claimPlanId}} — без капча-заголовков`);
   const claim = await api("POST", "/api/v1/zcode-plan/billing/claim", { plan_id: claimPlanId });
   console.log("claim HTTP", claim.status, "code:", claim.json?.code);
   console.log(JSON.stringify(claim.json ?? claim.text.slice(0, 500), null, 2).slice(0, 1200));

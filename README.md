@@ -34,6 +34,12 @@ docker compose exec zcode-orchestra zcode login --oauth --no-browser
 
 Команда напечатает ссылку — **откройте её в любом браузере** (на любой машине) и подтвердите вход. После логина JWT появится в `/root/.zcode/v2/credentials.json` внутри volume.
 
+> **Headless-сервер (Docker):** без Secret Service runtime требует секрет шифрования кредов. compose уже подключает `./.data/zcode-credential-secret` как `ZCODE_CREDENTIAL_SECRET_FILE` — создайте файл до первого логина:
+> ```bash
+> openssl rand -base64 32 > .data/zcode-credential-secret && chmod 600 .data/zcode-credential-secret
+> ```
+> Секрет нужно сохранить отдельно: без него после утери volume креды не расшифровать.
+
 > Если в вашем окружении официальное хранилище зашифровано (`enc:v1:` в credentials.json), тулза `claim_credits` честно вернёт ошибку — расшифровка official runtime'а не реализуется, выполните клейм вручную через браузер z.ai.
 
 ## Подключение как MCP из ZCode Desktop

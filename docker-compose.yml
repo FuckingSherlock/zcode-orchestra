@@ -12,6 +12,10 @@ services:
       - ./.data/workspace:/workspace
       # журнал задач (jobs.json + jobs/*.log)
       - ./data:/app/data
+      # секрет шифрования кредов (headless: без Secret Service нужен файл 32–4096 байт)
+      - ./.data/zcode-credential-secret:/run/secrets/zcode-credential-secret:ro
+    environment:
+      ZCODE_CREDENTIAL_SECRET_FILE: /run/secrets/zcode-credential-secret
     mem_limit: 1g
     restart: unless-stopped
     env_file: .env

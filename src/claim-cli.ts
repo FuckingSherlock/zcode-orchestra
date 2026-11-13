@@ -58,7 +58,8 @@ try {
   const outcome = await runPipeline({
     action,
     credentialsPath: args.credentials,
-    secretFile: args.secretFile,
+    // без явного флага берём секрет из окружения (compose прокидывает в контейнер)
+    secretFile: args.secretFile ?? process.env.ZCODE_CREDENTIAL_SECRET_FILE || undefined,
     secretInline: args.secretInline,
     planId: args.claimPlanId,
     appVersion: args.appVersion,

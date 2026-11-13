@@ -10,6 +10,7 @@ import { Runner } from "./runner.js";
 import { runClaim } from "./claim.js";
 import { notify } from "./notify.js";
 import type { AccountManager } from "./accounts.js";
+import type { NotifyBinder } from "./notify-bind.js";
 
 const WAIT_TIMEOUT_MS = 30 * 60 * 1000; // wait=true ждёт завершения не дольше 30 минут
 const STATUS_LOG_TAIL = 1000;
@@ -32,7 +33,7 @@ function allowedAccounts(config: OrchestraConfig, user: UserConfig): Set<string>
   return new Set(user.accounts.includes("*") ? config.accounts.map((a) => a.name) : user.accounts);
 }
 
-export function registerTools(server: McpServer, runner: Runner, config: OrchestraConfig, user: UserConfig, accounts: AccountManager): void {
+export function registerTools(server: McpServer, runner: Runner, config: OrchestraConfig, user: UserConfig, accounts: AccountManager, binder: NotifyBinder): void {
   const accountParam = {
     account: z.string().optional().describe("Имя аккаунта (из доступных вам); по умолчанию main или первый ваш"),
   };
@@ -235,15 +236,42 @@ export function registerTools(server: McpServer, runner: Runner, config: Orchest
     },
   );
 
-  // 7. notify_setup — задать/сменить Telegram chat id для уведомлений
+  // 7. notify_code — привязка Telegram по одноразовому коду (основной путь)
+  server.registerTool(
+    "notify_code",
+    {
+      title: "Привязка Telegram по коду",
+      description:
+        "Выдаёт одноразовый код привязки Telegram. Отдайте код пользователю и попросите отправить его боту " +
+        "@GlmQuotaBot любым сообщением — chat id привяжется автоматически (свой id узнавать не нужно), " +
+        "в Telegram придёт подтверждение ✅. Код живёт 10 минут. Повторный вызов — заменить привязку.",
+    },
+    async () => {
+      try {
+        const { code, expiresAtMs } = binder.requestCode(user);
+        return asText({
+          ok: true,
+          code,
+          bot: "@GlmQuotaBot",
+          expiresInMinutes: 10,
+          instructions: `Отправьте боту @GlmQuotaBot сообщение: ${code} (можно одним этим словом). Подтверждение придёт в Telegram.`,
+          next: "после подтверждения проверьте notify_test",
+          expiresAtIso: new Date(expiresAtMs).toISOString(),
+        });
+      } catch (e) {
+        return asError(`notify_code: ${errMsg(e)}`);
+      }
+    },
+  );
+
+  // 8. notify_setup — ручная привязка (если chat id известен) / переопределение на аккаунт
   server.registerTool(
     "notify_setup",
     {
-      title: "Настройка уведомлений",
+      title: "Настройка уведомлений (вручную)",
       description:
-        "Задать Telegram chat id для уведомлений автоклейма. Спросите у пользователя его chat id " +
-        "(например, он может написать боту-уведомителю и взять id из ответа). " +
-        "Без account — chat id пользователя (все его аккаунты); с account — переопределение для одного аккаунта.",
+        "Задать Telegram chat id вручную. Обычно НЕ нужно: используйте notify_code — юзер просто отправит " +
+        "код боту @GlmQuotaBot, и chat id привяжется сам. Годится для переопределения chat id одного аккаунта (account=...).",
       inputSchema: {
         chatId: z.number().int().positive().describe("Telegram chat id (положительное целое)"),
         account: accountParam.account,
@@ -260,7 +288,7 @@ export function registerTools(server: McpServer, runner: Runner, config: Orchest
     },
   );
 
-  // 8. notify_test — проверка канала уведомлений (вебхук → Telegram)
+  // 9. notify_test — проверка канала уведомлений (вебхук → Telegram)
   server.registerTool(
     "notify_test",
     {
@@ -284,7 +312,7 @@ export function registerTools(server: McpServer, runner: Runner, config: Orchest
     },
   );
 
-  // 9. account_add — добавить аккаунт zcode и запустить OAuth-логин
+  // 10. account_add — добавить аккаунт zcode и запустить OAuth-логин
   server.registerTool(
     "account_add",
     {
@@ -323,7 +351,7 @@ export function registerTools(server: McpServer, runner: Runner, config: Orchest
     },
   );
 
-  // 10. account_login_status — статус авторизации аккаунта
+  // 11. account_login_status — статус авторизации аккаунта
   server.registerTool(
     "account_login_status",
     {
@@ -345,7 +373,7 @@ export function registerTools(server: McpServer, runner: Runner, config: Orchest
     },
   );
 
-  // 11. account_list — список аккаунтов пользователя
+  // 12. account_list — список аккаунтов пользователя
   server.registerTool(
     "account_list",
     {
@@ -371,7 +399,7 @@ export function registerTools(server: McpServer, runner: Runner, config: Orchest
     },
   );
 
-  // 12. account_remove — удалить рантаймный аккаунт
+  // 13. account_remove — удалить рантаймный аккаунт
   server.registerTool(
     "account_remove",
     {

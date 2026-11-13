@@ -196,25 +196,7 @@ export class AccountManager {
 
   /** Запись runtime-состояния в <dataDir>/registry.json (читается loadConfig'ом при старте). */
   persistRegistry(config: OrchestraConfig): void {
-    const runtimePrefix = join(resolve(config.dataDir), "accounts") + sep;
-    const registry = {
-      accounts: config.accounts
-        .filter((a) => a.credentialsFile !== null && resolve(a.credentialsFile).startsWith(runtimePrefix))
-        .map((a) => ({
-          name: a.name,
-          credentialsFile: a.credentialsFile,
-          model: a.model,
-          ...(a.notifyChatId !== undefined ? { notifyChatId: a.notifyChatId } : {}),
-        })),
-      userChatIds: Object.fromEntries(config.users.filter((u) => u.chatId !== undefined).map((u) => [u.name, u.chatId as number])),
-      userAccounts: Object.fromEntries(config.users.filter((u) => !u.accounts.includes("*")).map((u) => [u.name, u.accounts])),
-    };
-    try {
-      mkdirSync(config.dataDir, { recursive: true });
-      writeFileSync(join(config.dataDir, "registry.json"), JSON.stringify(registry, null, 1));
-    } catch (e) {
-      log(`реестр не записан: ${e instanceof Error ? e.message : String(e)}`);
-    }
+    persistRegistryState(config);
   }
 
   /** Зачистить claim-state удалённого аккаунта (best effort). */
@@ -230,5 +212,28 @@ export class AccountManager {
     } catch {
       // не критично
     }
+  }
+}
+
+/** Запись runtime-состояния в <dataDir>/registry.json (читается loadConfig'ом при старте). */
+export function persistRegistryState(config: OrchestraConfig): void {
+  const runtimePrefix = join(resolve(config.dataDir), "accounts") + sep;
+  const registry = {
+    accounts: config.accounts
+      .filter((a) => a.credentialsFile !== null && resolve(a.credentialsFile).startsWith(runtimePrefix))
+      .map((a) => ({
+        name: a.name,
+        credentialsFile: a.credentialsFile,
+        model: a.model,
+        ...(a.notifyChatId !== undefined ? { notifyChatId: a.notifyChatId } : {}),
+      })),
+    userChatIds: Object.fromEntries(config.users.filter((u) => u.chatId !== undefined).map((u) => [u.name, u.chatId as number])),
+    userAccounts: Object.fromEntries(config.users.filter((u) => !u.accounts.includes("*")).map((u) => [u.name, u.accounts])),
+  };
+  try {
+    mkdirSync(config.dataDir, { recursive: true });
+    writeFileSync(join(config.dataDir, "registry.json"), JSON.stringify(registry, null, 1));
+  } catch (e) {
+    log(`реестр не записан: ${e instanceof Error ? e.message : String(e)}`);
   }
 }

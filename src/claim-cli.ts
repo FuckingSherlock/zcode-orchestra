@@ -13,6 +13,7 @@ interface CliArgs {
   claimPlanId?: string; // "" = авто-выбор (высший приоритет preview)
   doClaim: boolean;
   doStatus: boolean;
+  doDiscover: boolean;
   mintOnly: boolean;
   appVersion: string;
   platform?: string;
@@ -22,7 +23,7 @@ interface CliArgs {
 }
 
 function parseArgs(argv: string[]): CliArgs {
-  const args: CliArgs = { doClaim: false, doStatus: false, mintOnly: false, appVersion: "3.18.1", lang: "ru-RU" };
+  const args: CliArgs = { doClaim: false, doStatus: false, doDiscover: false, mintOnly: false, appVersion: "3.18.1", lang: "ru-RU" };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i] ?? "";
     const next = argv[i + 1];
@@ -36,6 +37,7 @@ function parseArgs(argv: string[]): CliArgs {
         if (nextIsValue) args.claimPlanId = argv[++i];
         break;
       case "--status": args.doStatus = true; break;
+      case "--discover": args.doDiscover = true; break;
       case "--mint-only": args.mintOnly = true; break;
       case "--app-version": if (nextIsValue) args.appVersion = argv[++i] ?? args.appVersion; break;
       case "--platform": if (nextIsValue) args.platform = argv[++i]; break;
@@ -51,7 +53,13 @@ function parseArgs(argv: string[]): CliArgs {
 const args = parseArgs(process.argv.slice(2));
 const log = (line: string): void => console.error(line);
 
-const action = args.mintOnly ? "mint-only" : args.doClaim ? "claim" : "status";
+const action = args.mintOnly
+  ? "mint-only"
+  : args.doClaim
+    ? "claim"
+    : args.doDiscover
+      ? "discover"
+      : "status";
 const platform = args.platform ?? (process.platform === "win32" ? "win32-x64" : process.platform === "darwin" ? "darwin-arm64" : "linux-x64");
 
 try {

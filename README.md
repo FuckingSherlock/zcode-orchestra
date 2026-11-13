@@ -81,8 +81,44 @@ node dist/claim-cli.js --mint-only   # смоук солвера без кред
 | `zcode_job_status(jobId)` | `{status, exitCode, result, usage, session_id, error, logTail}` — logTail: последние 1000 символов журнала задачи. |
 | `zcode_jobs()` | Последние 20 задач из журнала, свежие первыми. |
 | `zcode_job_cancel(jobId)` | Отменить задачу (queued снимается с очереди, running → SIGTERM → SIGKILL через 10с). |
-| `account_status(account?)` | `{account, model, configuredFiles, activeJobs, stats:{done, failed}}`. |
+| `account_status(account?)` | `{account, model, configuredFiles, activeJobs, stats:{done, failed}}` — только ваши аккаунты. |
 | `claim_credits(account?)` | Полный цикл клейма бесплатных кредитов: активация (`event/report`) → детект (`billing/preview`) → минт Aliyun-капчи (вендоред happy-dom-солвер, ~5-10с) → `billing/claim` с верификацией → квота (`billing/current`). Детали и коды отказа — секция «Клейм бесплатных кредитов» выше. |
+| `notify_test(account?)` | Тест канала уведомлений: шлёт проверочное сообщение в ваш Telegram через Worker-релей. |
+
+Все тулзы скоупятся пользователем MCP: bearer-токен → пользователь (`ORCHESTRA_USERS`), чужие аккаунты и их задачи недоступны.
+
+## Мультиюзер
+
+Каждый пользователь = свой bearer-токен + свой набор аккаунтов + свой Telegram chat для уведомлений:
+
+```json
+ORCHESTRA_USERS=[{"name":"warlock","token":"<длинный-случайный>","accounts":["main","alt"],"chatId":123456789},
+                 {"name":"friend","token":"<другой-токен>","accounts":["*"]}]
+```
+
+`accounts: ["*"]` — все аккаунты. `chatId` (или `notifyChatId` у аккаунта) — куда слать уведомления автоклейма. Без `ORCHESTRA_USERS` — один пользователь `default` с `ORCHESTRA_TOKEN` и доступом ко всем аккаунтам (обратная совместимость). Chat id передаётся юзером при настройке MCP — один раз, через конфиг или инструмент `notify_test` для проверки.
+
+## Автоклейм
+
+Планировщик внутри сервера (`ORCHESTRA_CLAIM_AUTO=1`, интервал `ORCHESTRA_CLAIM_INTERVAL_MS=600000`) каждые N минут на каждый аккаунт:
+
+1. **discovery** (дёшево, без капчи): `event/report` (мимикрия перезахода — триггерит выдачу кампаний) → `marketing/touch` (карточки кампаний, plan_id) → `billing/preview`;
+2. новый кандидат (не в state / окно истекло / бэкофф прошёл) → полный клейм через claim-cli (минт капчи + claim);
+3. результат в `data/claim-state.json` (переживает рестарты): успех — suppress до `ends_at` плана; `1005` (суточный слот занят) — до NextAt/6ч; `1002` (кампания умерла) — 7 дней; прочие отказы — бэкофф 30 мин;
+4. уведомление владельцу через Worker-релей (успех/отказ/сломанный discovery).
+
+Окна (18:00 ночные, пт-вечер выходные) не хардкодятся — кандидат появляется в touch/preview и клеймится в течение одного тика. Под полной нагрузкой (все слоты заняты задачами) тик пропускается — claim-child не конкурирует за память с брифами.
+
+## Уведомления (CF Worker-релей)
+
+Токен бота НЕ хранится в контейнере — только в Cloudflare Worker. Деплой:
+
+1. dash.cloudflare.com → Workers → Create → вставить `worker/notify-worker.js`;
+2. Settings → Variables → Secrets: `TG_BOT_TOKEN` (токен от @BotFather) и `AUTH_TOKEN` (длинная случайная строка);
+3. в `.env` оркестра: `NOTIFY_WEBHOOK_URL=https://<worker>.workers.dev/notify`, `NOTIFY_WEBHOOK_TOKEN=<AUTH_TOKEN>`;
+4. юзеру в Telegram: написать боту что угодно (активировать чат), проверить `notify_test`.
+
+Без `NOTIFY_WEBHOOK_URL` уведомления выключены (одна строка в лог, автоклейм работает).
 
 Типичный цикл оркестратора: `zcode_agent(brief=..., workdir="proj-a")` → `zcode_job_status(jobId)` → забрать `result`/`session_id` → продолжение сессии: `zcode_agent(brief="...", resume=<session_id>, workdir="proj-a")`.
 
@@ -97,7 +133,11 @@ Env-переменные (все с дефолтами; валидация пр�
 | `ORCHESTRA_TRANSPORT` | `http` | `http` \| `stdio` |
 | `ORCHESTRA_MAX_PARALLEL` | `2` | Семафор параллельных процессов zcode |
 | `ORCHESTRA_START_STAGGER_MS` | `20000` | Минимальный интервал между стартами задач (мс): стартовый burst zcode — пик памяти, на слабом хосте разносите старты; 0 = без разноса |
-| `ORCHESTRA_ACCOUNTS` | `[{"name":"main",...}]` | JSON-массив аккаунтов: `[{"name":"main","credentialsFile":null,"providerConfigFile":null,"model":"account:zai-start-plan/GLM-5.3-Flash"}]`. `credentialsFile`/`providerConfigFile` — абсолютные пути; если заданы, при спавне ребёнку подставляются `ZCODE_CLI_CREDENTIALS_FILE` / `ZCODE_PERSONAL_PROVIDER_CONFIG_FILE` (изоляция аккаунтов). Дефолт — один аккаунт `main` с общим `~/.zcode`. |
+| `ORCHESTRA_ACCOUNTS` | `[{"name":"main",...}]` | JSON-массив аккаунтов: `[{"name":"main","credentialsFile":null,"providerConfigFile":null,"model":"account:zai-start-plan/GLM-5.3-Flash","notifyChatId":123}]`. `credentialsFile`/`providerConfigFile` — абсолютные пути; если заданы, при спавне ребёнку подставляются `ZCODE_CLI_CREDENTIALS_FILE` / `ZCODE_PERSONAL_PROVIDER_CONFIG_FILE` (изоляция аккаунтов). `notifyChatId` — переопределение Telegram chat для уведомлений этого аккаунта. Дефолт — один аккаунт `main` с общим `~/.zcode`. |
+| `ORCHESTRA_USERS` | `default` | JSON-массив пользователей: `[{"name":"warlock","token":"...","accounts":["main","*"],"chatId":123456789}]` — см. «Мультиюзер». |
+| `ORCHESTRA_CLAIM_AUTO` | `1` | Автоклейм: планировщик discovery+claim внутри сервера |
+| `ORCHESTRA_CLAIM_INTERVAL_MS` | `600000` | Интервал тика автоклейма (60с..3.6млн) |
+| `NOTIFY_WEBHOOK_URL` / `NOTIFY_WEBHOOK_TOKEN` | — | CF Worker-релей уведомлений (см. «Уведомления»); без URL — выключены |
 | `ORCHESTRA_ZCODE_BIN` | `zcode` | Бинарник zcode CLI |
 | `ORCHESTRA_WORKDIR_ROOT` | `/workspace` | База для относительных workdir |
 | `ORCHESTRA_DATA_DIR` | `./data` (в контейнере `/app/data`) | Журнал задач: `jobs.json` + `jobs/*.log` |

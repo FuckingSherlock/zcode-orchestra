@@ -26,12 +26,14 @@ export interface ActivityPlan {
 
 export interface ClaimOutcome {
   ok: boolean;
-  action: "status" | "claim" | "mint-only";
+  action: "status" | "claim" | "discover" | "mint-only";
   error?: string;
   appVersion: string;
   platform: string;
   captchaConfig?: CaptchaConfig;
   plans?: ActivityPlan[];
+  /** plan_id из карточек кампаний (marketing/touch) — для планировщика автоклейма */
+  campaignPlanIds?: string[];
   quota?: unknown;
   quotaSource?: "current" | "balance";
   mint?: { certifyId: string; region: string; verifyParam?: string };
@@ -44,11 +46,12 @@ export interface ClaimOutcome {
     startsAt?: number;
     endsAt?: number;
     status?: string;
+    grants?: string[];
   };
 }
 
 export interface PipelineOptions {
-  action: "status" | "claim" | "mint-only";
+  action: "status" | "claim" | "discover" | "mint-only";
   credentialsPath?: string;
   secretFile?: string;
   secretInline?: string;
@@ -254,6 +257,23 @@ function jsonPath(v: unknown, path: string[]): unknown {
 
 // ---------- шаги пайплайна ----------
 
+/** Гранты (токен-энтайтлменты) из объекта плана — общий фильтр для preview и claim. */
+function grantsOf(planObj: unknown): string[] {
+  const ents = jsonPath(planObj, ["entitlements"]);
+  const grants: string[] = [];
+  if (!Array.isArray(ents)) return grants;
+  for (const e of ents) {
+    if (jsonStr(e, ["meter"]) !== "model_usage") continue;
+    if (jsonStr(e, ["unit_type", "unitType"]) !== "token") continue;
+    const showName = jsonStr(e, ["show_name", "showName"]);
+    if (showName === "") continue;
+    const units = jsonInt(e, ["grant_units", "grantUnits"]) ?? 0;
+    const period = jsonStr(e, ["period"]) || "one_time";
+    grants.push(`${showName}: ${units} token (${period})`);
+  }
+  return grants;
+}
+
 function parsePlans(body: unknown): ActivityPlan[] {
   const plansRaw = jsonPath(body, ["data", "plans"]);
   if (!Array.isArray(plansRaw)) return [];
@@ -261,28 +281,43 @@ function parsePlans(body: unknown): ActivityPlan[] {
   for (const p of plansRaw) {
     const planId = jsonStr(p, ["plan_id", "planId"]);
     if (planId === "") continue;
-    const grants: string[] = [];
-    const ents = jsonPath(p, ["entitlements"]);
-    if (Array.isArray(ents)) {
-      for (const e of ents) {
-        if (jsonStr(e, ["meter"]) !== "model_usage") continue;
-        if (jsonStr(e, ["unit_type", "unitType"]) !== "token") continue;
-        const showName = jsonStr(e, ["show_name", "showName"]);
-        if (showName === "") continue;
-        const units = jsonInt(e, ["grant_units", "grantUnits"]) ?? 0;
-        const period = jsonStr(e, ["period"]) || "one_time";
-        grants.push(`${showName}: ${units} token (${period})`);
-      }
-    }
     out.push({
       planId,
       name: jsonStr(p, ["name"]) || planId,
       priority: jsonInt(p, ["priority"]) ?? 0,
-      grants,
+      grants: grantsOf(p),
     });
   }
   out.sort((a, b) => b.priority - a.priority);
   return out;
+}
+
+/** Рекурсивный сбор plan_id из ответа кампаний (схема marketing/touch не фиксирована). */
+function collectPlanIds(v: unknown, out: Set<string>): void {
+  if (Array.isArray(v)) {
+    for (const x of v) collectPlanIds(x, out);
+    return;
+  }
+  if (v && typeof v === "object") {
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+      if ((k === "plan_id" || k === "planId") && typeof val === "string" && val !== "") out.add(val);
+      else collectPlanIds(val, out);
+    }
+  }
+}
+
+/** Карточки кампаний (marketing/touch) — источник plan_id помимо preview. */
+async function fetchCampaignPlanIds(headers: Record<string, string>, log: (line: string) => void): Promise<string[]> {
+  try {
+    const r = await zaiRequest("GET", `${BASE_URL}/marketing/touch?seq=1`, headers);
+    const out = new Set<string>();
+    collectPlanIds(r.json, out);
+    log(`[touch] plan_id в кампаниях: ${out.size > 0 ? [...out].join(", ") : "нет"}`);
+    return [...out];
+  } catch (e) {
+    log(`[touch] ${e instanceof Error ? e.message : String(e)} (не критично)`);
+    return [];
+  }
 }
 
 async function reportActivationEvents(
@@ -400,8 +435,8 @@ export async function runPipeline(opts: PipelineOptions): Promise<ClaimOutcome> 
   const captchaConfig = await fetchCaptchaConfig(opts.appVersion, opts.platform);
   log(`[captcha] конфиг: prefix=${captchaConfig.prefix} scene=${captchaConfig.sceneId} region=${captchaConfig.region} enabled=${captchaConfig.enabled}`);
 
-  // 2. события активации (триггерят выдачу Start Plan) — только в claim-режиме
-  if (action === "claim") {
+  // 2. события активации (триггерят выдачу Start Plan) — claim и discover (мимикрия «перезахода»)
+  if (action === "claim" || action === "discover") {
     await reportActivationEvents(jwt, headers, { appVersion: opts.appVersion, deviceMid, lang: opts.lang }, log);
   }
 
@@ -424,6 +459,12 @@ export async function runPipeline(opts: PipelineOptions): Promise<ClaimOutcome> 
     log(`[preview] активностей: ${plans.length}${plans.map((p) => ` | ${p.planId} «${p.name}»`).join("")}`);
   } catch (e) {
     return { ...base, error: `preview: ${e instanceof Error ? e.message : String(e)}` };
+  }
+
+  // 3b. discover: карточки кампаний + список — для планировщика автоклейма (без клейма и квоты)
+  if (action === "discover") {
+    const campaignPlanIds = await fetchCampaignPlanIds(headers, log);
+    return { ...base, ok: true, plans, campaignPlanIds };
   }
 
   // 4. клейм
@@ -463,28 +504,29 @@ export async function runPipeline(opts: PipelineOptions): Promise<ClaimOutcome> 
       const a = lastAttempt;
       if (!a) {
         claim = { planId: target.planId, planName: target.name, result: "error", message: "попытки клейма не выполнились" };
-      } else if (a.code === 0) {
+      } else {
+        // planInfo (data.plan) есть и при успехе, и при ряде отказов (1005 → NextAt=ends_at)
         const planInfo = a.data && typeof a.data === "object" ? (a.data as Record<string, unknown>).plan : undefined;
-        claim = {
+        const shared = {
           planId: target.planId,
-          planName: target.name,
-          result: "claimed",
-          code: 0,
+          planName: jsonStr(planInfo, ["name"]) || target.name,
+          code: a.code,
           startsAt: jsonInt(planInfo, ["starts_at"]),
           endsAt: jsonInt(planInfo, ["ends_at"]),
           status: jsonStr(planInfo, ["status"]),
+          grants: grantsOf(planInfo),
         };
-        log(`[claim] УСПЕХ: ${JSON.stringify(planInfo ?? {})}`);
-      } else {
-        const friendly = explainClaimCode(a.code);
-        claim = {
-          planId: target.planId,
-          planName: target.name,
-          result: a.code === 3007 ? "error" : "denied",
-          code: a.code,
-          message: friendly ? `${friendly} (код ${a.code}: ${a.message || "-"})` : `код ${a.code}: ${a.message || "-"}`,
-        };
-        log(`[claim] отказ/ошибка: ${claim.message}`);
+        claim =
+          a.code === 0
+            ? { ...shared, result: "claimed" as const }
+            : {
+                ...shared,
+                result: a.code === 3007 ? ("error" as const) : ("denied" as const),
+                message: explainClaimCode(a.code)
+                  ? `${explainClaimCode(a.code)} (код ${a.code}: ${a.message || "-"})`
+                  : `код ${a.code}: ${a.message || "-"}`,
+              };
+        log(`[claim] ${claim.result}: ${claim.message ?? JSON.stringify(planInfo ?? {})}`);
       }
     }
   }

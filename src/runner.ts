@@ -310,6 +310,11 @@ export class Runner {
 
   // ---------- постановка в очередь ----------
 
+  /** Число активных (running) задач — планировщик автоклейма не стартует claim-child под полной нагрузкой. */
+  get activeCount(): number {
+    return this.active;
+  }
+
   submit(args: SubmitArgs): SubmitResult {
     if (typeof args.brief !== "string" || args.brief.trim() === "") {
       throw new Error("brief обязателен и не может быть пустым");

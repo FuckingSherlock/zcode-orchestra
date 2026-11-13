@@ -2,6 +2,7 @@
 // Приоритет: env > JSON-файл > дефолты. Все ошибки валидации — фатальные при старте.
 import { readFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
+import { timingSafeEqual } from "node:crypto";
 
 export interface AccountConfig {
   name: string;
@@ -11,10 +12,22 @@ export interface AccountConfig {
   providerConfigFile: string | null;
   /** Модель по умолчанию для задач этого аккаунта */
   model: string;
+  /** Переопределение Telegram chat id для уведомлений этого аккаунта (иначе — chat id владельца-юзера) */
+  notifyChatId?: number;
+}
+
+/** Пользователь MCP: свой bearer-токен, свой набор аккаунтов, свой Telegram chat для уведомлений. */
+export interface UserConfig {
+  name: string;
+  token: string;
+  /** Имена доступных аккаунтов или "*" — все */
+  accounts: string[];
+  /** Telegram chat id для уведомлений (передаётся при настройке MCP у юзера) */
+  chatId?: number;
 }
 
 export interface OrchestraConfig {
-  /** Bearer-токен HTTP-транспорта (обязателен в http-режиме) */
+  /** Bearer-токен HTTP-транспорта (обязателен в http-режиме; совместимость — одиночный токен) */
   token: string;
   port: number;
   transport: "http" | "stdio";
@@ -27,6 +40,12 @@ export interface OrchestraConfig {
    */
   startStaggerMs: number;
   accounts: AccountConfig[];
+  /** Пользователи MCP (токен → аккаунты + chat id уведомлений); минимум один */
+  users: UserConfig[];
+  /** Автоклейм: планировщик тикает discovery и клеймит появившиеся активности */
+  claimAuto: boolean;
+  /** Интервал тика автоклейма (мс) */
+  claimIntervalMs: number;
   /** Бинарник zcode CLI */
   zcodeBin: string;
   /** База для относительных workdir */
@@ -44,6 +63,9 @@ type FileConfig = Partial<{
   maxParallel: number;
   startStaggerMs: number;
   accounts: unknown;
+  users: unknown;
+  claimAuto: boolean;
+  claimIntervalMs: number;
   zcodeBin: string;
   workdirRoot: string;
   dataDir: string;
@@ -86,7 +108,7 @@ function asStagger(v: unknown, fallback: number): number {
   return n;
 }
 
-/** Валидация массива аккаунтов. Формат элемента: {name, credentialsFile?, providerConfigFile?, model?} */
+/** Валидация массива аккаунтов. Формат элемента: {name, credentialsFile?, providerConfigFile?, model?, notifyChatId?} */
 function asAccounts(v: unknown, source: string): AccountConfig[] {
   let raw = v;
   if (typeof raw === "string") {
@@ -109,6 +131,75 @@ function asAccounts(v: unknown, source: string): AccountConfig[] {
       credentialsFile: optFilePath(a.credentialsFile, `${source}[${i}].credentialsFile`),
       providerConfigFile: optFilePath(a.providerConfigFile, `${source}[${i}].providerConfigFile`),
       model: typeof a.model === "string" && a.model.trim() !== "" ? a.model : DEFAULT_MODEL,
+      ...(a.notifyChatId === undefined ? {} : { notifyChatId: asChatId(a.notifyChatId, `${source}[${i}].notifyChatId`) }),
+    };
+  });
+}
+
+function asChatId(v: unknown, what: string): number {
+  const n = typeof v === "number" ? v : Number(String(v).trim());
+  if (!Number.isInteger(n) || n <= 0) fail(`${what}: ожидался положительный целый chat id, получено «${v}»`);
+  return n;
+}
+
+function asBool(v: unknown, what: string, fallback: boolean): boolean {
+  if (v === undefined || v === null || v === "") return fallback;
+  if (typeof v === "boolean") return v;
+  const s = String(v).trim().toLowerCase();
+  if (s === "1" || s === "true" || s === "yes" || s === "on") return true;
+  if (s === "0" || s === "false" || s === "no" || s === "off") return false;
+  fail(`${what}: ожидалось true|false, получено «${v}»`);
+}
+
+function asInterval(v: unknown, what: string, fallback: number, min: number, max: number): number {
+  if (v === undefined || v === null || v === "") return fallback;
+  const n = typeof v === "number" ? v : Number(String(v).trim());
+  if (!Number.isInteger(n) || n < min || n > max) fail(`${what}: ожидалось целое ${min}..${max}, получено «${v}»`);
+  return n;
+}
+
+/** Валидация массива пользователей: [{name, token, accounts: ["main"|"*"], chatId?}] */
+function asUsers(v: unknown, accountNames: string[], source: string): UserConfig[] {
+  let raw = v;
+  if (typeof raw === "string") {
+    try {
+      raw = JSON.parse(raw);
+    } catch (e) {
+      fail(`${source}: невалидный JSON пользователей (${(e as Error).message})`);
+    }
+  }
+  if (!Array.isArray(raw) || raw.length === 0) fail(`${source}: ожидался непустой JSON-массив пользователей`);
+  const seenName = new Set<string>();
+  const seenToken = new Set<string>();
+  return raw.map((entry, i) => {
+    if (entry === null || typeof entry !== "object") fail(`${source}[${i}]: ожидался объект пользователя`);
+    const u = entry as Record<string, unknown>;
+    const name = asString(u.name, `${source}[${i}].name`);
+    if (seenName.has(name)) fail(`${source}: дублирующееся имя пользователя «${name}»`);
+    seenName.add(name);
+    const token = asString(u.token, `${source}[${i}].token`);
+    if (seenToken.has(token)) fail(`${source}: дублирующийся токен пользователя «${name}»`);
+    seenToken.add(token);
+    let accounts: string[];
+    if (typeof u.accounts === "string" && u.accounts.trim() === "*") {
+      accounts = ["*"];
+    } else {
+      if (!Array.isArray(u.accounts) || u.accounts.length === 0) {
+        fail(`${source}[${i}].accounts: ожидался непустой массив имён аккаунтов или "*"`);
+      }
+      accounts = (u.accounts as unknown[]).map((a, j) => {
+        const an = asString(a, `${source}[${i}].accounts[${j}]`);
+        if (!accountNames.includes(an)) {
+          fail(`${source}[${i}].accounts[${j}]: аккаунт «${an}» не найден (доступные: ${accountNames.join(", ")})`);
+        }
+        return an;
+      });
+    }
+    return {
+      name,
+      token,
+      accounts,
+      ...(u.chatId === undefined || u.chatId === null || u.chatId === "" ? {} : { chatId: asChatId(u.chatId, `${source}[${i}].chatId`) }),
     };
   });
 }
@@ -169,12 +260,26 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): OrchestraConfi
     accounts = [{ name: "main", credentialsFile: null, providerConfigFile: null, model: DEFAULT_MODEL }];
   }
 
+  // 3b) пользователи: env ORCHESTRA_USERS полностью заменяет файловый список;
+  // без явного списка — один «default» с общим токеном и доступом ко всем аккаунтам
+  let users: UserConfig[];
+  if (env.ORCHESTRA_USERS !== undefined && env.ORCHESTRA_USERS !== "") {
+    users = asUsers(env.ORCHESTRA_USERS, accounts.map((a) => a.name), "ORCHESTRA_USERS");
+  } else if (file.users !== undefined) {
+    users = asUsers(file.users, accounts.map((a) => a.name), "ORCHESTRA_CONFIG.users");
+  } else {
+    users = [{ name: "default", token, accounts: ["*"] }];
+  }
+
+  const claimAuto = asBool(env.ORCHESTRA_CLAIM_AUTO ?? file.claimAuto, "ORCHESTRA_CLAIM_AUTO", true);
+  const claimIntervalMs = asInterval(env.ORCHESTRA_CLAIM_INTERVAL_MS ?? file.claimIntervalMs, "ORCHESTRA_CLAIM_INTERVAL_MS", 600_000, 60_000, 3_600_000);
+
   // 4) фатальная валидация http-режима
   if (transport === "http" && token.trim() === "") {
     fail("ORCHESTRA_TOKEN пуст — в http-режиме bearer-токен обязателен (либо переключите ORCHESTRA_TRANSPORT=stdio)");
   }
 
-  return { token, port, transport, maxParallel, startStaggerMs, accounts, zcodeBin, workdirRoot, dataDir };
+  return { token, port, transport, maxParallel, startStaggerMs, accounts, users, claimAuto, claimIntervalMs, zcodeBin, workdirRoot, dataDir };
 }
 
 /** Поиск аккаунта по имени; пусто/undefined → «main». Неизвестное имя — ошибка. */
@@ -186,4 +291,32 @@ export function findAccount(config: OrchestraConfig, name?: string): AccountConf
     throw new Error(`аккаунт «${wanted}» не найден; доступные аккаунты: ${known}`);
   }
   return acc;
+}
+
+/**
+ * Поиск аккаунта в скоупе пользователя; пусто/undefined → «main» (или первый
+ * доступный). Чужой/неизвестный аккаунт — ошибка со списком доступных.
+ */
+export function findUserAccount(config: OrchestraConfig, user: UserConfig, name?: string): AccountConfig {
+  const allowed = user.accounts.includes("*") ? config.accounts.map((a) => a.name) : user.accounts;
+  const wanted = (name ?? "").trim() === "" ? (allowed.includes("main") ? "main" : (allowed[0] ?? "")) : (name as string).trim();
+  if (wanted === "" || !allowed.includes(wanted)) {
+    throw new Error(`аккаунт «${wanted || "?"}» недоступен пользователю «${user.name}»; доступные: ${allowed.join(", ")}`);
+  }
+  const acc = config.accounts.find((a) => a.name === wanted);
+  if (!acc) {
+    const known = config.accounts.map((a) => a.name).join(", ");
+    throw new Error(`аккаунт «${wanted}» не найден в конфиге; доступные аккаунты: ${known}`);
+  }
+  return acc;
+}
+
+/** Разрешение bearer-токена → пользователь; не найден — null. Сравнение constant-time. */
+export function resolveUser(config: OrchestraConfig, token: string): UserConfig | null {
+  const supplied = Buffer.from(token, "utf8");
+  for (const u of config.users) {
+    const known = Buffer.from(u.token, "utf8");
+    if (known.length === supplied.length && timingSafeEqual(known, supplied)) return u;
+  }
+  return null;
 }

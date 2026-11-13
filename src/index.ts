@@ -1,37 +1,32 @@
-// Точка входа zcode-orchestra: конфиг → runner → MCP-сервер на http или stdio транспорте.
+// Точка входа zcode-orchestra: конфиг → runner → автоклейм-планировщик → MCP-сервер на http или stdio транспорте.
 import http from "node:http";
-import crypto from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { loadConfig, type OrchestraConfig } from "./config.js";
+import { loadConfig, resolveUser, type OrchestraConfig, type UserConfig } from "./config.js";
 import { Runner } from "./runner.js";
+import { ClaimScheduler } from "./claim-scheduler.js";
 import { registerTools } from "./tools.js";
 import { log } from "./logger.js";
 
 const NAME = "zcode-orchestra";
-const VERSION = "1.0.0";
+const VERSION = "1.1.0";
 const BODY_LIMIT = 10 * 1024 * 1024; // 10 МБ на JSON-RPC запрос
 
-function createMcpServer(config: OrchestraConfig, runner: Runner): McpServer {
+function createMcpServer(config: OrchestraConfig, runner: Runner, user: UserConfig): McpServer {
   const server = new McpServer({ name: NAME, version: VERSION }, { capabilities: { tools: {} } });
-  registerTools(server, runner, config);
+  registerTools(server, runner, config, user);
   return server;
 }
 
-/** Constant-time сравнение bearer-токена */
-function tokenEquals(a: string, b: string): boolean {
-  const ba = Buffer.from(a, "utf8");
-  const bb = Buffer.from(b, "utf8");
-  if (ba.length !== bb.length) return false;
-  return crypto.timingSafeEqual(ba, bb);
+function bearerToken(req: http.IncomingMessage): string {
+  const m = /^Bearer\s+(.+)$/i.exec(req.headers.authorization ?? "");
+  return m?.[1]?.trim() ?? "";
 }
 
-function checkAuth(req: http.IncomingMessage, token: string): boolean {
-  const header = req.headers.authorization ?? "";
-  const m = /^Bearer\s+(.+)$/i.exec(header);
-  const supplied = m?.[1];
-  return supplied !== undefined && tokenEquals(supplied.trim(), token);
+/** Bearer-токен → пользователь MCP (constant-time); /healthz проходит мимо этой проверки. */
+function checkAuth(req: http.IncomingMessage, config: OrchestraConfig): boolean {
+  return resolveUser(config, bearerToken(req)) !== null;
 }
 
 function readBody(req: http.IncomingMessage): Promise<unknown | undefined> {
@@ -67,7 +62,7 @@ function readBody(req: http.IncomingMessage): Promise<unknown | undefined> {
  * Stateless-режим streamable HTTP: на каждый POST /mcp — своя пара transport+server
  * (легковесно, сессии в памяти не копятся — важно при 1.9 ГБ RAM на хосте).
  */
-async function handleMcpPost(config: OrchestraConfig, runner: Runner, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+async function handleMcpPost(config: OrchestraConfig, runner: Runner, user: UserConfig, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   let body: unknown;
   try {
     body = await readBody(req);
@@ -79,7 +74,7 @@ async function handleMcpPost(config: OrchestraConfig, runner: Runner, req: http.
     return;
   }
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
-  const server = createMcpServer(config, runner);
+  const server = createMcpServer(config, runner, user);
   res.on("close", () => {
     void server.close();
     void transport.close();
@@ -133,7 +128,7 @@ async function handleHttp(
     return;
   }
 
-  if (!checkAuth(req, config.token)) {
+  if (!checkAuth(req, config)) {
     res.writeHead(401, { "Content-Type": "application/json", "WWW-Authenticate": "Bearer" });
     res.end(JSON.stringify({ ok: false, error: "unauthorized" }));
     return;
@@ -143,7 +138,7 @@ async function handleHttp(
   // не поддерживаем намеренно: транспорт открыл бы вечный SSE-поток (утечка соединений),
   // а 405 для stateless-сервера допустим по спецификации MCP.
   if (req.method === "POST") {
-    await handleMcpPost(config, runner, req, res);
+    await handleMcpPost(config, runner, resolveUser(config, bearerToken(req)) as UserConfig, req, res);
   } else {
     res.writeHead(405, { "Content-Type": "application/json", Allow: "POST" });
     res.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed (stateless server: POST only)" }, id: null }));
@@ -160,7 +155,10 @@ async function main(): Promise<void> {
   }
 
   const runner = new Runner(config); // поднимает dataDir и подгружает jobs.json
+  const scheduler = new ClaimScheduler(config, runner);
+  scheduler.start();
   log(`транспорт: ${config.transport}, порт ${config.port}, параллелизм ${config.maxParallel}, аккаунты: ${config.accounts.map((a) => a.name).join(", ")}`);
+  log(`пользователи: ${config.users.map((u) => `${u.name}(${u.accounts.join("/")}${u.chatId ? `, tg:${u.chatId}` : ""})`).join(", ")}`);
   log(`данные: ${config.dataDir}, zcode: ${config.zcodeBin}, workdir root: ${config.workdirRoot}`);
 
   process.on("unhandledRejection", (reason) => {
@@ -172,6 +170,7 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     log(`получен ${signal}, останавливаюсь...`);
+    scheduler.stop();
     const forceExit = setTimeout(() => process.exit(0), 15_000);
     forceExit.unref();
     void runner
@@ -183,7 +182,7 @@ async function main(): Promise<void> {
   process.on("SIGINT", () => shutdown("SIGINT"));
 
   if (config.transport === "stdio") {
-    const server = createMcpServer(config, runner);
+    const server = createMcpServer(config, runner, config.users[0] as UserConfig);
     const transport = new StdioServerTransport();
     await server.connect(transport);
     log("stdio-транспорт готов (MCP по stdin/stdout)");

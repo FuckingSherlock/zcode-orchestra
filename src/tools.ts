@@ -9,6 +9,7 @@ import { findUserAccount, type OrchestraConfig, type UserConfig } from "./config
 import { Runner } from "./runner.js";
 import { runClaim } from "./claim.js";
 import { notify } from "./notify.js";
+import type { AccountManager } from "./accounts.js";
 
 const WAIT_TIMEOUT_MS = 30 * 60 * 1000; // wait=true ждёт завершения не дольше 30 минут
 const STATUS_LOG_TAIL = 1000;
@@ -31,7 +32,7 @@ function allowedAccounts(config: OrchestraConfig, user: UserConfig): Set<string>
   return new Set(user.accounts.includes("*") ? config.accounts.map((a) => a.name) : user.accounts);
 }
 
-export function registerTools(server: McpServer, runner: Runner, config: OrchestraConfig, user: UserConfig): void {
+export function registerTools(server: McpServer, runner: Runner, config: OrchestraConfig, user: UserConfig, accounts: AccountManager): void {
   const accountParam = {
     account: z.string().optional().describe("Имя аккаунта (из доступных вам); по умолчанию main или первый ваш"),
   };
@@ -234,14 +235,38 @@ export function registerTools(server: McpServer, runner: Runner, config: Orchest
     },
   );
 
-  // 7. notify_test — проверка канала уведомлений (вебхук → Telegram)
+  // 7. notify_setup — задать/сменить Telegram chat id для уведомлений
+  server.registerTool(
+    "notify_setup",
+    {
+      title: "Настройка уведомлений",
+      description:
+        "Задать Telegram chat id для уведомлений автоклейма. Спросите у пользователя его chat id " +
+        "(например, он может написать боту-уведомителю и взять id из ответа). " +
+        "Без account — chat id пользователя (все его аккаунты); с account — переопределение для одного аккаунта.",
+      inputSchema: {
+        chatId: z.number().int().positive().describe("Telegram chat id (положительное целое)"),
+        account: accountParam.account,
+      },
+    },
+    async (args) => {
+      try {
+        if (args.account !== undefined) findUserAccount(config, user, args.account); // скоуп
+        const r = accounts.setNotifyChatId(config, user, args.chatId, args.account);
+        return asText({ ok: true, setFor: r.target, chatId: args.chatId });
+      } catch (e) {
+        return asError(`notify_setup: ${errMsg(e)}`);
+      }
+    },
+  );
+
+  // 8. notify_test — проверка канала уведомлений (вебхук → Telegram)
   server.registerTool(
     "notify_test",
     {
       title: "Тест уведомлений",
       description:
-        "Шлёт тестовое сообщение в ваш Telegram (chat id задан при настройке; переопределяется в аккаунте). " +
-        "Проверьте notify_test после настройки NOTIFY_WEBHOOK_URL/chat id.",
+        "Шлёт тестовое сообщение в ваш Telegram через Worker-релей. Проверьте после notify_setup.",
       inputSchema: accountParam,
     },
     async (args) => {
@@ -249,12 +274,121 @@ export function registerTools(server: McpServer, runner: Runner, config: Orchest
         const acc = findUserAccount(config, user, args.account);
         const chatId = acc.notifyChatId ?? user.chatId;
         if (chatId === undefined) {
-          return asError("notify_test: chat id не задан — укажите chatId у вашего пользователя (ORCHESTRA_USERS) или notifyChatId у аккаунта");
+          return asError("notify_test: chat id не задан — сначала notify_setup (или chatId в ORCHESTRA_USERS)");
         }
         const r = await notify(chatId, `🔔 zcode-orchestra: тест уведомлений (юзер ${user.name}, акк ${acc.name})`);
         return asText(r.ok ? { ok: true, chatId } : r);
       } catch (e) {
         return asError(`notify_test: ${errMsg(e)}`);
+      }
+    },
+  );
+
+  // 9. account_add — добавить аккаунт zcode и запустить OAuth-логин
+  server.registerTool(
+    "account_add",
+    {
+      title: "Добавить аккаунт zcode",
+      description:
+        "Создаёт аккаунт и запускает OAuth-авторизацию z.ai: вернёт ссылку — отдайте её пользователю. " +
+        "Инструкция пользователю: сначала залогиниться на chat.z.ai в браузере, затем ОТКРЫТЬ ССЫЛКУ СРАЗУ " +
+        "(она одноразовая и быстро протухает) и подтвердить доступ. После этого проверьте account_login_status.",
+      inputSchema: {
+        name: z.string().min(1).max(32).describe("Имя нового аккаунта (латиница/цифры/-/_)"),
+        model: z.string().optional().describe("Модель по умолчанию, напр. account:zai-start-plan/GLM-5.3-Flash"),
+      },
+    },
+    async (args) => {
+      try {
+        const r = await accounts.startLogin(config, user, args.name, args.model);
+        if (r.alreadyAuthorized) {
+          return asText({ ok: true, name: args.name, authorized: true, note: "аккаунт уже авторизован — можно пользоваться" });
+        }
+        if (!r.url) {
+          return asError(`account_add: ссылка не пришла от zcode login за 20с — повторите вызов или проверьте account_login_status (${args.name})`);
+        }
+        return asText({
+          ok: true,
+          name: args.name,
+          loginUrl: r.url,
+          instructions: [
+            "1. В браузере: войдите на chat.z.ai (если ещё не залогинены).",
+            "2. СРАЗУ откройте loginUrl и подтвердите доступ (ссылка одноразовая).",
+            "3. Проверьте результат: account_login_status(name=" + args.name + ").",
+          ].join(" "),
+        });
+      } catch (e) {
+        return asError(`account_add: ${errMsg(e)}`);
+      }
+    },
+  );
+
+  // 10. account_login_status — статус авторизации аккаунта
+  server.registerTool(
+    "account_login_status",
+    {
+      title: "Статус авторизации аккаунта",
+      description: "Авторизован ли аккаунт zcode (credentials на месте) и крутится ли сейчас OAuth-логин.",
+      inputSchema: {
+        name: z.string().min(1).describe("Имя аккаунта"),
+      },
+    },
+    async (args) => {
+      try {
+        if (!config.accounts.some((a) => a.name === args.name)) {
+          return asError(`account_login_status: аккаунт «${args.name}» не найден`);
+        }
+        return asText(accounts.loginSnapshot(config, args.name));
+      } catch (e) {
+        return asError(`account_login_status: ${errMsg(e)}`);
+      }
+    },
+  );
+
+  // 11. account_list — список аккаунтов пользователя
+  server.registerTool(
+    "account_list",
+    {
+      title: "Список аккаунтов",
+      description: "Ваши аккаунты zcode: имя, модель, авторизован ли, активные задачи.",
+    },
+    async () => {
+      try {
+        const allowed = allowedAccounts(config, user);
+        const list = config.accounts
+          .filter((a) => allowed.has(a.name))
+          .map((a) => ({
+            name: a.name,
+            model: a.model,
+            authorized: accounts.authorized(config, a.name),
+            notifyChatId: a.notifyChatId ?? user.chatId,
+            activeJobs: runner.activeForAccount(a.name),
+          }));
+        return asText({ count: list.length, accounts: list });
+      } catch (e) {
+        return asError(`account_list: ${errMsg(e)}`);
+      }
+    },
+  );
+
+  // 12. account_remove — удалить рантаймный аккаунт
+  server.registerTool(
+    "account_remove",
+    {
+      title: "Удалить аккаунт zcode",
+      description:
+        "Удаляет аккаунт (созданный через account_add): OAuth-креды, директорию, запись в реестре, claim-state. " +
+        "Аккаунты из статического конфига (ORCHESTRA_ACCOUNTS) так не удаляются.",
+      inputSchema: {
+        name: z.string().min(1).describe("Имя аккаунта"),
+      },
+    },
+    async (args) => {
+      try {
+        accounts.removeAccount(config, user, args.name);
+        return asText({ ok: true, name: args.name, removed: true });
+      } catch (e) {
+        return asError(`account_remove: ${errMsg(e)}`);
       }
     },
   );

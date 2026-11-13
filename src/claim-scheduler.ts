@@ -6,6 +6,7 @@
 // бэкоффы по кодам (1005 — слот занят, 1002 — кампания умерла, прочие — 30 мин).
 // Уведомления — владельцу аккаунта (юзеру) через CF Worker-релей (notify.ts).
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import type { AccountConfig, OrchestraConfig } from "./config.js";
 import { runClaimJson } from "./claim.js";
@@ -158,6 +159,13 @@ export class ClaimScheduler {
       return;
     }
     const accState = this.state.accounts[acc.name] ?? emptyAccountState();
+
+    // аккаунт без кредов (добавлен, OAuth не завершён) — discovery бесполезен
+    const credsPath = acc.credentialsFile ?? join(homedir(), ".zcode", "v2", "credentials.json");
+    if (!existsSync(credsPath)) {
+      log(`автоклейм (${acc.name}): credentials нет — аккаунт не авторизован, пропуск`);
+      return;
+    }
 
     // 1. discovery — spawn claim-cli --discover (events + touch + preview, без минта)
     const run = await runClaimJson(this.config, undefined, acc.name, undefined, "discover");

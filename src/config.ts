@@ -1,7 +1,9 @@
 // Конфиг оркестратора: env-переменные + опциональный JSON-файл (ORCHESTRA_CONFIG).
 // Приоритет: env > JSON-файл > дефолты. Все ошибки валидации — фатальные при старте.
-import { readFileSync } from "node:fs";
-import { isAbsolute } from "node:path";
+// Поверх статики накладывается runtime-реестр <dataDir>/registry.json (тулзы
+// account_add / notify_setup): динамические аккаунты, chat id юзеров, их списки аккаунтов.
+import { existsSync, readFileSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 import { timingSafeEqual } from "node:crypto";
 
 export interface AccountConfig {
@@ -254,7 +256,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): OrchestraConfi
     env.ORCHESTRA_WORKDIR_ROOT !== undefined && env.ORCHESTRA_WORKDIR_ROOT !== ""
       ? env.ORCHESTRA_WORKDIR_ROOT
       : file.workdirRoot ?? "/workspace";
-  const dataDir = env.ORCHESTRA_DATA_DIR !== undefined && env.ORCHESTRA_DATA_DIR !== "" ? env.ORCHESTRA_DATA_DIR : file.dataDir ?? "./data";
 
   // 3) аккаунты: env ORCHESTRA_ACCOUNTS полностью заменяет файловый список
   let accounts: AccountConfig[];
@@ -282,12 +283,59 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): OrchestraConfi
   const claimAfterHourMsk = asInterval(env.ORCHESTRA_CLAIM_AFTER_MSK ?? file.claimAfterHourMsk, "ORCHESTRA_CLAIM_AFTER_MSK", 14, 0, 23);
   const claimFridayAfterHourMsk = asInterval(env.ORCHESTRA_CLAIM_FRIDAY_AFTER_MSK ?? file.claimFridayAfterHourMsk, "ORCHESTRA_CLAIM_FRIDAY_AFTER_MSK", 17, 0, 23);
 
+  // 3c) runtime-реестр (тулзы account_add / notify_setup пишут его в dataDir) — поверх статики
+  const dataDir = env.ORCHESTRA_DATA_DIR !== undefined && env.ORCHESTRA_DATA_DIR !== ""
+    ? env.ORCHESTRA_DATA_DIR
+    : file.dataDir ?? "./data";
+  applyRuntimeRegistry(dataDir, accounts, users);
+
   // 4) фатальная валидация http-режима
   if (transport === "http" && token.trim() === "") {
     fail("ORCHESTRA_TOKEN пуст — в http-режиме bearer-токен обязателен (либо переключите ORCHESTRA_TRANSPORT=stdio)");
   }
 
   return { token, port, transport, maxParallel, startStaggerMs, accounts, users, claimAuto, claimIntervalMs, claimAfterHourMsk, claimFridayAfterHourMsk, zcodeBin, workdirRoot, dataDir };
+}
+
+interface RegistryEntry {
+  name: string;
+  owner?: string;
+  credentialsFile?: string;
+  model?: string;
+  notifyChatId?: number;
+}
+
+/** Наложение runtime-реестра на статические accounts/users (пропавшего файла нет — ок). */
+function applyRuntimeRegistry(dataDir: string, accounts: AccountConfig[], users: UserConfig[]): void {
+  const registryPath = join(dataDir, "registry.json");
+  if (!existsSync(registryPath)) return;
+  try {
+    const reg = JSON.parse(readFileSync(registryPath, "utf8")) as {
+      accounts?: RegistryEntry[];
+      userChatIds?: Record<string, number>;
+      userAccounts?: Record<string, string[]>;
+    };
+    for (const ra of reg.accounts ?? []) {
+      if (!ra?.name || accounts.some((a) => a.name === ra.name)) continue; // статика сильнее реестра при конфликте имён
+      accounts.push({
+        name: ra.name,
+        credentialsFile: typeof ra.credentialsFile === "string" && isAbsolute(ra.credentialsFile) ? ra.credentialsFile : null,
+        providerConfigFile: null,
+        model: typeof ra.model === "string" && ra.model.trim() !== "" ? ra.model : DEFAULT_MODEL,
+        ...(Number.isInteger(ra.notifyChatId) ? { notifyChatId: ra.notifyChatId as number } : {}),
+      });
+    }
+    for (const [userName, chatId] of Object.entries(reg.userChatIds ?? {})) {
+      const u = users.find((x) => x.name === userName);
+      if (u && Number.isInteger(chatId) && (chatId as number) > 0) u.chatId = chatId as number;
+    }
+    for (const [userName, accs] of Object.entries(reg.userAccounts ?? {})) {
+      const u = users.find((x) => x.name === userName);
+      if (u && Array.isArray(accs) && accs.every((a) => typeof a === "string")) u.accounts = accs as string[];
+    }
+  } catch (e) {
+    console.error(`конфиг: реестр ${registryPath} повреждён и проигнорирован: ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 /** Поиск аккаунта по имени; пусто/undefined → «main». Неизвестное имя — ошибка. */

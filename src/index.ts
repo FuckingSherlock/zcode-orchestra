@@ -6,16 +6,17 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { loadConfig, resolveUser, type OrchestraConfig, type UserConfig } from "./config.js";
 import { Runner } from "./runner.js";
 import { ClaimScheduler } from "./claim-scheduler.js";
+import { AccountManager } from "./accounts.js";
 import { registerTools } from "./tools.js";
 import { log } from "./logger.js";
 
 const NAME = "zcode-orchestra";
-const VERSION = "1.1.0";
+const VERSION = "1.2.0";
 const BODY_LIMIT = 10 * 1024 * 1024; // 10 МБ на JSON-RPC запрос
 
-function createMcpServer(config: OrchestraConfig, runner: Runner, user: UserConfig): McpServer {
+function createMcpServer(config: OrchestraConfig, runner: Runner, user: UserConfig, accounts: AccountManager): McpServer {
   const server = new McpServer({ name: NAME, version: VERSION }, { capabilities: { tools: {} } });
-  registerTools(server, runner, config, user);
+  registerTools(server, runner, config, user, accounts);
   return server;
 }
 
@@ -62,7 +63,7 @@ function readBody(req: http.IncomingMessage): Promise<unknown | undefined> {
  * Stateless-режим streamable HTTP: на каждый POST /mcp — своя пара transport+server
  * (легковесно, сессии в памяти не копятся — важно при 1.9 ГБ RAM на хосте).
  */
-async function handleMcpPost(config: OrchestraConfig, runner: Runner, user: UserConfig, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+async function handleMcpPost(config: OrchestraConfig, runner: Runner, user: UserConfig, accounts: AccountManager, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   let body: unknown;
   try {
     body = await readBody(req);
@@ -74,7 +75,7 @@ async function handleMcpPost(config: OrchestraConfig, runner: Runner, user: User
     return;
   }
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
-  const server = createMcpServer(config, runner, user);
+  const server = createMcpServer(config, runner, user, accounts);
   res.on("close", () => {
     void server.close();
     void transport.close();
@@ -83,9 +84,9 @@ async function handleMcpPost(config: OrchestraConfig, runner: Runner, user: User
   await transport.handleRequest(req, res, body);
 }
 
-function createHttpServer(config: OrchestraConfig, runner: Runner): http.Server {
+function createHttpServer(config: OrchestraConfig, runner: Runner, accounts: AccountManager): http.Server {
   const server = http.createServer((req, res) => {
-    void handleHttp(config, runner, req, res).catch((e) => {
+    void handleHttp(config, runner, accounts, req, res).catch((e) => {
       log(`ошибка обработки запроса: ${(e as Error).message}`);
       if (!res.headersSent) {
         res.writeHead(500, { "Content-Type": "application/json" });
@@ -104,6 +105,7 @@ function createHttpServer(config: OrchestraConfig, runner: Runner): http.Server 
 async function handleHttp(
   config: OrchestraConfig,
   runner: Runner,
+  accounts: AccountManager,
   req: http.IncomingMessage,
   res: http.ServerResponse,
 ): Promise<void> {
@@ -138,7 +140,7 @@ async function handleHttp(
   // не поддерживаем намеренно: транспорт открыл бы вечный SSE-поток (утечка соединений),
   // а 405 для stateless-сервера допустим по спецификации MCP.
   if (req.method === "POST") {
-    await handleMcpPost(config, runner, resolveUser(config, bearerToken(req)) as UserConfig, req, res);
+    await handleMcpPost(config, runner, resolveUser(config, bearerToken(req)) as UserConfig, accounts, req, res);
   } else {
     res.writeHead(405, { "Content-Type": "application/json", Allow: "POST" });
     res.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed (stateless server: POST only)" }, id: null }));
@@ -155,6 +157,7 @@ async function main(): Promise<void> {
   }
 
   const runner = new Runner(config); // поднимает dataDir и подгружает jobs.json
+  const accounts = new AccountManager();
   const scheduler = new ClaimScheduler(config, runner);
   scheduler.start();
   log(`транспорт: ${config.transport}, порт ${config.port}, параллелизм ${config.maxParallel}, аккаунты: ${config.accounts.map((a) => a.name).join(", ")}`);
@@ -182,12 +185,12 @@ async function main(): Promise<void> {
   process.on("SIGINT", () => shutdown("SIGINT"));
 
   if (config.transport === "stdio") {
-    const server = createMcpServer(config, runner, config.users[0] as UserConfig);
+    const server = createMcpServer(config, runner, config.users[0] as UserConfig, accounts);
     const transport = new StdioServerTransport();
     await server.connect(transport);
     log("stdio-транспорт готов (MCP по stdin/stdout)");
   } else {
-    const httpServer = createHttpServer(config, runner);
+    const httpServer = createHttpServer(config, runner, accounts);
     httpServer.listen(config.port, "0.0.0.0", () => {
       log(`http-транспорт готов: http://0.0.0.0:${config.port}/mcp (healthz: /healthz)`);
     });

@@ -19,5 +19,7 @@ services:
       # кап heap'а: наследуется спавнами zcode (2 параллельные задачи = до ~5 node-процессов)
       NODE_OPTIONS: --max-old-space-size=224
     mem_limit: 1g
+    # burst (старт рантайма, каталог с CDN) уходит в host swap, а не в OOM-килл
+    memswap_limit: 1536m
     restart: unless-stopped
     env_file: .env

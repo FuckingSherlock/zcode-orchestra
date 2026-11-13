@@ -12,7 +12,9 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import type { OrchestraConfig, UserConfig } from "./config.js";
+import { runClaimJson } from "./claim.js";
 import { log } from "./logger.js";
+import type { Whoami } from "./claim/client.js";
 
 const LOGIN_TIMEOUT_MS = 15 * 60 * 1000;
 const URL_WAIT_MS = 20_000;
@@ -50,6 +52,17 @@ export class AccountManager {
       return existsSync(p) && readFileSync(p, "utf8").trim().length > 10;
     } catch {
       return false;
+    }
+  }
+
+  /** Личность z.ai-аккаунта (email/ник из кредов) — claim-cli --whoami, без сети. */
+  async whoamiFor(config: OrchestraConfig, name: string): Promise<Whoami | null> {
+    if (!this.authorized(config, name)) return null;
+    try {
+      const run = await runClaimJson(config, undefined, name, undefined, "whoami");
+      return run.outcome?.whoami ?? null;
+    } catch {
+      return null;
     }
   }
 

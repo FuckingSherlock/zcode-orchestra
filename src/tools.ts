@@ -11,6 +11,7 @@ import { runClaim } from "./claim.js";
 import { notify } from "./notify.js";
 import type { AccountManager } from "./accounts.js";
 import type { NotifyBinder } from "./notify-bind.js";
+import type { ClaimScheduler } from "./claim-scheduler.js";
 
 const WAIT_TIMEOUT_MS = 30 * 60 * 1000; // wait=true ждёт завершения не дольше 30 минут
 const STATUS_LOG_TAIL = 1000;
@@ -33,7 +34,7 @@ function allowedAccounts(config: OrchestraConfig, user: UserConfig): Set<string>
   return new Set(user.accounts.includes("*") ? config.accounts.map((a) => a.name) : user.accounts);
 }
 
-export function registerTools(server: McpServer, runner: Runner, config: OrchestraConfig, user: UserConfig, accounts: AccountManager, binder: NotifyBinder): void {
+export function registerTools(server: McpServer, runner: Runner, config: OrchestraConfig, user: UserConfig, accounts: AccountManager, binder: NotifyBinder, scheduler: ClaimScheduler): void {
   const accountParam = {
     account: z.string().optional().describe("Имя аккаунта (из доступных вам); по умолчанию main или первый ваш"),
   };
@@ -373,25 +374,48 @@ export function registerTools(server: McpServer, runner: Runner, config: Orchest
     },
   );
 
-  // 12. account_list — список аккаунтов пользователя
+  // 12. account_list — ПОЛНЫЙ статус по всем своим аккаунтам
   server.registerTool(
     "account_list",
     {
-      title: "Список аккаунтов",
-      description: "Ваши аккаунты zcode: имя, модель, авторизован ли, активные задачи.",
+      title: "Статус всех аккаунтов",
+      description:
+        "Статус ваших аккаунтов zcode: имя, модель, авторизован ли, кто это на z.ai (email/ник), куда идут " +
+        "уведомления, активные задачи и claim-state автоклейма (какие планы заклеймлены/отклонены, до когда, " +
+        "сколько попыток). Это главный инструмент «на каком акке что произошло».",
     },
     async () => {
       try {
         const allowed = allowedAccounts(config, user);
-        const list = config.accounts
-          .filter((a) => allowed.has(a.name))
-          .map((a) => ({
-            name: a.name,
-            model: a.model,
-            authorized: accounts.authorized(config, a.name),
-            notifyChatId: a.notifyChatId ?? user.chatId,
-            activeJobs: runner.activeForAccount(a.name),
-          }));
+        const list = await Promise.all(
+          config.accounts
+            .filter((a) => allowed.has(a.name))
+            .map(async (a) => {
+              const whoami = await accounts.whoamiFor(config, a.name).catch(() => null);
+              const st = scheduler.accountClaimState(a.name);
+              return {
+                name: a.name,
+                model: a.model,
+                authorized: accounts.authorized(config, a.name),
+                ...(whoami?.label ? { zaiAccount: whoami.label } : whoami?.id ? { zaiUserId: whoami.id } : {}),
+                notifyChatId: a.notifyChatId ?? user.chatId,
+                activeJobs: runner.activeForAccount(a.name),
+                claim: st
+                  ? {
+                      plans: Object.entries(st.plans).map(([planId, s]) => ({
+                        planId,
+                        result: s.result,
+                        code: s.code,
+                        attempts: s.attempts,
+                        ...(s.endsAt !== undefined ? { endsAt: new Date(s.endsAt * 1000).toISOString() } : {}),
+                        ...(s.lastMessage ? { lastMessage: s.lastMessage.slice(0, 200) } : {}),
+                      })),
+                      ...(st.lastDiscoveryError ? { lastDiscoveryError: st.lastDiscoveryError } : {}),
+                    }
+                  : undefined,
+              };
+            }),
+        );
         return asText({ count: list.length, accounts: list });
       } catch (e) {
         return asError(`account_list: ${errMsg(e)}`);

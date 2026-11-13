@@ -24,12 +24,23 @@ export interface ActivityPlan {
   grants: string[];
 }
 
+export interface Whoami {
+  /** user_id из user_info/JWT */
+  id: string;
+  /** лучшая человекочитаемая метка z.ai-аккаунта (email или ник) */
+  label?: string;
+  email?: string;
+  nickname?: string;
+}
+
 export interface ClaimOutcome {
   ok: boolean;
-  action: "status" | "claim" | "discover" | "mint-only";
+  action: "status" | "claim" | "discover" | "mint-only" | "whoami";
   error?: string;
   appVersion: string;
   platform: string;
+  /** личность z.ai-аккаунта из расшифрованных кредов — чтобы отличать акки в уведомлениях/статусе */
+  whoami?: Whoami;
   captchaConfig?: CaptchaConfig;
   plans?: ActivityPlan[];
   /** plan_id из карточек кампаний (marketing/touch) — для планировщика автоклейма */
@@ -51,7 +62,7 @@ export interface ClaimOutcome {
 }
 
 export interface PipelineOptions {
-  action: "status" | "claim" | "discover" | "mint-only";
+  action: "status" | "claim" | "discover" | "whoami" | "mint-only";
   credentialsPath?: string;
   secretFile?: string;
   secretInline?: string;
@@ -148,6 +159,52 @@ export function decryptCredentials(credentialsPath: string, secretFile?: string,
   }
   if (!jwt) throw new Error("не удалось расшифровать zcodejwttoken ни одним вариантом секрета");
   return { jwt, jwtField, plain };
+}
+
+// ---------- whoami: личность z.ai-аккаунта из расшифрованных кредов ----------
+
+function pickStr(obj: unknown, keys: string[]): string | undefined {
+  if (obj === null || typeof obj !== "object") return undefined;
+  const rec = obj as Record<string, unknown>;
+  for (const k of keys) {
+    const v = rec[k];
+    if (typeof v === "string" && v.trim() !== "") return v.trim();
+  }
+  return undefined;
+}
+
+/** user_info (расшифрованный) + payload JWT: email/ник/user_id. Без сети, без верификации подписи. */
+function extractWhoami(plain: Record<string, string>, jwt: string): Whoami {
+  let email: string | undefined;
+  let nickname: string | undefined;
+  let id: string | undefined;
+  for (const [k, v] of Object.entries(plain)) {
+    if (!/user_info/i.test(k)) continue;
+    try {
+      const ui = JSON.parse(v) as unknown;
+      email ??= pickStr(ui, ["email", "user_email"]);
+      nickname ??= pickStr(ui, ["nickname", "nick_name", "name", "username", "user_name", "display_name"]);
+      id ??= pickStr(ui, ["user_id", "userId", "id"]);
+    } catch {
+      // user_info не JSON — пропускаем
+    }
+  }
+  try {
+    const payloadB64 = jwt.split(".")[1] ?? "";
+    const payload = JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf8")) as unknown;
+    email ??= pickStr(payload, ["email", "user_email"]);
+    nickname ??= pickStr(payload, ["nickname", "nick_name", "name", "username", "user_name", "display_name"]);
+    id ??= pickStr(payload, ["user_id", "userId", "sub", "id"]);
+  } catch {
+    // не JWT-пейлоад
+  }
+  const label = email ?? nickname;
+  return {
+    id: id ?? "",
+    ...(label !== undefined ? { label } : {}),
+    ...(email !== undefined ? { email } : {}),
+    ...(nickname !== undefined ? { nickname } : {}),
+  };
 }
 
 // ---------- HTTP-клиент (мимикрия под официальный клиент) ----------
@@ -419,14 +476,22 @@ export async function runPipeline(opts: PipelineOptions): Promise<ClaimOutcome> 
   let jwt: string;
   let jwtField = "";
   let deviceMid = "";
+  let whoami: Whoami;
   try {
     const creds = decryptCredentials(opts.credentialsPath, opts.secretFile, opts.secretInline);
     jwt = creds.jwt;
     jwtField = creds.jwtField;
     deviceMid = deviceMidFor(opts.credentialsPath);
-    log(`[creds] расшифрован ${jwtField} (JWT ${jwt.length} симв.), deviceMid=${deviceMid ? "есть" : "нет"}`);
+    whoami = extractWhoami(creds.plain, jwt);
+    base.whoami = whoami;
+    log(`[creds] расшифрован ${jwtField} (JWT ${jwt.length} симв.), deviceMid=${deviceMid ? "есть" : "нет"}${whoami.label ? `, z.ai-акк: ${whoami.label}` : whoami.id ? `, user_id=${whoami.id}` : ""}`);
   } catch (e) {
     return { ...base, error: `креды: ${e instanceof Error ? e.message : String(e)}` };
+  }
+
+  // whoami: без сети — только расшифровка (для статуса аккаунтов)
+  if (action === "whoami") {
+    return { ...base, ok: true };
   }
 
   const headers = clientHeaders(jwt, { appVersion: opts.appVersion, platform: opts.platform, lang: opts.lang, deviceMid });

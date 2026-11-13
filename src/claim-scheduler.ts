@@ -19,7 +19,7 @@ const MAX_ATTEMPTS = 4;                    // максимум попыток к
 const DISCOVERY_ERROR_NOTIFY_GAP_MS = 6 * 60 * 60 * 1000; // не спамим про сломанный discovery чаще 1 раза в 6ч
 const GATE_LOG_GAP_MS = 6 * 60 * 60 * 1000; // «до окна раздач» — не чаще раза в 6ч
 
-interface PlanState {
+export interface PlanState {
   result: "claimed" | "denied" | "error";
   code?: number;
   /** ends_at плана (грант активен до / NextAt при 1005) — unix seconds */
@@ -29,7 +29,7 @@ interface PlanState {
   attempts: number;
 }
 
-interface AccountClaimState {
+export interface AccountClaimState {
   plans: Record<string, PlanState>;
   lastDiscoveryErrorAt?: number;
   lastDiscoveryError?: string;
@@ -93,6 +93,11 @@ export class ClaimScheduler {
       clearTimeout(this.timer);
       this.timer = null;
     }
+  }
+
+  /** Claim-state аккаунта для тулзы статуса (read-only). */
+  accountClaimState(accName: string): AccountClaimState | undefined {
+    return this.state.accounts[accName];
   }
 
   private scheduleNext(): void {
@@ -228,7 +233,9 @@ export class ClaimScheduler {
     this.saveState();
     log(`автоклейм (${acc.name}): ${planId} → ${rec.result}${rec.code !== undefined ? ` (код ${rec.code})` : ""}${rec.lastMessage ? `: ${rec.lastMessage.slice(0, 200)}` : ""}`);
 
-    // 6. уведомление владельцу
+    // 6. уведомление владельцу — с меткой И имени акка, И z.ai-аккаунта (кто именно заклеймил)
+    const whoLabel = claimRun.outcome?.whoami?.label;
+    const accLabel = `${acc.name}${whoLabel ? ` (${whoLabel})` : ""}`;
     const chat = acc.notifyChatId ?? owner.chatId;
     if (chat === undefined) {
       log(`автоклейм (${acc.name}): chat id не задан (user.chatId/account.notifyChatId) — уведомление пропущено`);
@@ -236,11 +243,11 @@ export class ClaimScheduler {
     }
     if (rec.result === "claimed" && claimRun.outcome?.claim) {
       const cl = claimRun.outcome.claim;
-      await notify(chat, claimSuccessText(acc.name, cl.planName ?? names.get(planId) ?? planId, planId, cl.grants ?? [], cl.endsAt, cl.startsAt));
+      await notify(chat, claimSuccessText(accLabel, cl.planName ?? names.get(planId) ?? planId, planId, cl.grants ?? [], cl.endsAt, cl.startsAt));
     } else if (rec.attempts >= MAX_ATTEMPTS) {
-      await notify(chat, `⛔ Автоклейм сдался (акк ${acc.name})\n${planId}\n${rec.lastMessage ?? "(без сообщения)"}\n${MAX_ATTEMPTS} попыток исчерпаны — жду следующего окна.`);
+      await notify(chat, `⛔ Автоклейм сдался (акк ${accLabel})\n${planId}\n${rec.lastMessage ?? "(без сообщения)"}\n${MAX_ATTEMPTS} попыток исчерпаны — жду следующего окна.`);
     } else {
-      await notify(chat, claimFailText(acc.name, planId, rec.result === "denied" ? "denied" : "error", `${rec.lastMessage ?? "(без сообщения)"} (попытка ${rec.attempts}/${MAX_ATTEMPTS})`));
+      await notify(chat, claimFailText(accLabel, planId, rec.result === "denied" ? "denied" : "error", `${rec.lastMessage ?? "(без сообщения)"} (попытка ${rec.attempts}/${MAX_ATTEMPTS})`));
     }
   }
 

@@ -36,7 +36,7 @@ export async function runClaimJson(
   user: UserConfig | undefined,
   accountName: string | undefined,
   planId?: string,
-  mode: "claim" | "status" | "discover" = "claim",
+  mode: "claim" | "status" | "discover" | "whoami" = "claim",
 ): Promise<ClaimRunResult> {
   const acc = user ? findUserAccount(config, user, accountName) : findAccount(config, accountName);
   const credsPath = acc.credentialsFile ?? join(homedir(), ".zcode", "v2", "credentials.json");
@@ -46,7 +46,13 @@ export async function runClaimJson(
     "--credentials",
     credsPath,
     ...(secretFile !== "" ? ["--secret-file", secretFile] : []),
-    ...(mode === "claim" ? ["--claim", ...(planId ? [planId] : [])] : mode === "discover" ? ["--discover"] : []),
+    ...(mode === "claim"
+      ? ["--claim", ...(planId ? [planId] : [])]
+      : mode === "discover"
+        ? ["--discover"]
+        : mode === "whoami"
+          ? ["--whoami"]
+          : []),
   ];
 
   return await new Promise<ClaimRunResult>((resolve) => {
@@ -86,6 +92,9 @@ const RAW_SNIPPET = 1600; // сырой квота-JSON в тексте резу
 
 function formatOutcome(accName: string, outcome: ClaimOutcome, stderrTail: string): string {
   const lines: string[] = [`=== claim_credits (${accName}) ===`];
+  if (outcome.whoami?.label) {
+    lines.push(`Аккаунт z.ai: ${outcome.whoami.label}${outcome.whoami.id ? ` (id ${outcome.whoami.id})` : ""}`);
+  }
   if (outcome.error) lines.push(`ОШИБКА: ${outcome.error}`);
 
   const plans = outcome.plans ?? [];

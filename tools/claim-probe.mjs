@@ -77,7 +77,7 @@ function decryptEncV1(value, secret) {
     if (!m) throw new Error("не удалось разобрать enc:v2 формат");
     if (m[1] === "os") throw new Error("enc:v2:os требует OS keyring — не поддерживается зондом");
     const key = createHash("sha256").update(secret, "utf8").digest();
-    const keyid = key.toString("hex").slice(0, 24);
+    const keyid = createHash("sha256").update(key).digest().toString("hex").slice(0, 24);
     if (keyid !== m[2]) throw new Error(`keyid не совпал: файл ${m[2]}, наш ${keyid} — не тот секрет?`);
     body = m[3];
   } else {

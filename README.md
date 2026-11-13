@@ -124,16 +124,19 @@ ORCHESTRA_USERS=[{"name":"warlock","token":"<длинный-случайный>"
 
 Окна (18:00 ночные, пт-вечер выходные) не хардкодятся — кандидат появляется в touch/preview и клеймится в течение одного тика. Под полной нагрузкой (все слоты заняты задачами) тик пропускается — claim-child не конкурирует за память с брифами.
 
-## Уведомления (CF Worker-релей)
+## Уведомления (общий бот @GlmQuotaBot — один на все инсталляции)
 
-Токен бота НЕ хранится в контейнере — только в Cloudflare Worker. Деплой:
+Бот и CF Worker-релей **общие**: каждый деплоит только свой MCP-оркестр, а уведомления все шлют в один воркер (токен бота живёт в нём). В `.env` оркестра впишите:
 
-1. dash.cloudflare.com → Workers → Create → вставить `worker/notify-worker.js`;
-2. Settings → Variables → Secrets: `TG_BOT_TOKEN` (токен от @BotFather) и `AUTH_TOKEN` (длинная случайная строка);
-3. в `.env` оркестра: `NOTIFY_WEBHOOK_URL=https://<worker>.workers.dev/notify`, `NOTIFY_WEBHOOK_TOKEN=<AUTH_TOKEN>`;
-4. юзеру в Telegram: написать боту что угодно (активировать чат), проверить `notify_test`.
+```
+NOTIFY_WEBHOOK_URL=https://zcode-orchestra-notify.slackerwarlock.workers.dev/notify
+NOTIFY_WEBHOOK_TOKEN=<токен релея — спросите у владельца бота>
+ORCHESTRA_USER_NAME=<как вас звать в уведомлениях>
+```
 
-Без `NOTIFY_WEBHOOK_URL` уведомления выключены (одна строка в лог, автоклейм работает).
+Привязка своего Telegram — по одноразовому коду, свой id узнавать не нужно: `notify_code` → отправить код боту @GlmQuotaBot → придёт ✅. Коды работают между инсталляциями (буфер апдейтов общий на воркере, каждый код матчится один раз).
+
+Свой отдельный бот+воркер (`worker/notify-worker.js`) — опционально, если нужен личный канал: деплой в dash.cloudflare.com, секреты `TG_BOT_TOKEN` и `AUTH_TOKEN`, дальше те же два env-переменные со своими значениями. Без `NOTIFY_WEBHOOK_URL` уведомления просто выключены (автоклейм работает молча).
 
 Типичный цикл оркестратора: `zcode_agent(brief=..., workdir="proj-a")` → `zcode_job_status(jobId)` → забрать `result`/`session_id` → продолжение сессии: `zcode_agent(brief="...", resume=<session_id>, workdir="proj-a")`.
 

@@ -275,7 +275,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): OrchestraConfi
   } else if (file.users !== undefined) {
     users = asUsers(file.users, accounts.map((a) => a.name), "ORCHESTRA_CONFIG.users");
   } else {
-    users = [{ name: "default", token, accounts: ["*"] }];
+    users = [{ name: (env.ORCHESTRA_USER_NAME ?? "").trim() || "default", token, accounts: ["*"] }];
   }
 
   const claimAuto = asBool(env.ORCHESTRA_CLAIM_AUTO ?? file.claimAuto, "ORCHESTRA_CLAIM_AUTO", true);

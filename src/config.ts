@@ -20,6 +20,12 @@ export interface OrchestraConfig {
   transport: "http" | "stdio";
   /** Максимальное число параллельных процессов zcode (семафор) */
   maxParallel: number;
+  /**
+   * Минимальный интервал между СТАРТАМИ задач (мс). Стартовый burst zcode-рантайма
+   * (загрузка каталога + разогрев нативного процесса) — пик памяти; на слабых хостах
+   * одновременный старт двух задач уходит в OOM. 0 = стартовать без разнесения.
+   */
+  startStaggerMs: number;
   accounts: AccountConfig[];
   /** Бинарник zcode CLI */
   zcodeBin: string;
@@ -36,6 +42,7 @@ type FileConfig = Partial<{
   port: number;
   transport: string;
   maxParallel: number;
+  startStaggerMs: number;
   accounts: unknown;
   zcodeBin: string;
   workdirRoot: string;
@@ -69,6 +76,13 @@ function asMaxParallel(v: unknown, fallback: number): number {
   if (v === undefined || v === null || v === "") return fallback;
   const n = typeof v === "number" ? v : Number(String(v).trim());
   if (!Number.isInteger(n) || n < 1 || n > 64) fail(`maxParallel: ожидалось целое 1..64, получено «${v}»`);
+  return n;
+}
+
+function asStagger(v: unknown, fallback: number): number {
+  if (v === undefined || v === null || v === "") return fallback;
+  const n = typeof v === "number" ? v : Number(String(v).trim());
+  if (!Number.isInteger(n) || n < 0 || n > 600_000) fail(`startStaggerMs: ожидалось целое 0..600000, получено «${v}»`);
   return n;
 }
 
@@ -137,6 +151,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): OrchestraConfi
   const port = asPort(env.ORCHESTRA_PORT ?? file.port, "ORCHESTRA_PORT", 8787);
   const transport = asTransport(env.ORCHESTRA_TRANSPORT ?? file.transport, "http");
   const maxParallel = asMaxParallel(env.ORCHESTRA_MAX_PARALLEL ?? file.maxParallel, 2);
+  const startStaggerMs = asStagger(env.ORCHESTRA_START_STAGGER_MS ?? file.startStaggerMs, 20_000);
   const zcodeBin = env.ORCHESTRA_ZCODE_BIN !== undefined && env.ORCHESTRA_ZCODE_BIN !== "" ? env.ORCHESTRA_ZCODE_BIN : file.zcodeBin ?? "zcode";
   const workdirRoot =
     env.ORCHESTRA_WORKDIR_ROOT !== undefined && env.ORCHESTRA_WORKDIR_ROOT !== ""
@@ -159,7 +174,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): OrchestraConfi
     fail("ORCHESTRA_TOKEN пуст — в http-режиме bearer-токен обязателен (либо переключите ORCHESTRA_TRANSPORT=stdio)");
   }
 
-  return { token, port, transport, maxParallel, accounts, zcodeBin, workdirRoot, dataDir };
+  return { token, port, transport, maxParallel, startStaggerMs, accounts, zcodeBin, workdirRoot, dataDir };
 }
 
 /** Поиск аккаунта по имени; пусто/undefined → «main». Неизвестное имя — ошибка. */

@@ -74,6 +74,7 @@ Env-переменные (все с дефолтами; валидация пр�
 | `ORCHESTRA_PORT` | `8787` | Порт HTTP-транспорта |
 | `ORCHESTRA_TRANSPORT` | `http` | `http` \| `stdio` |
 | `ORCHESTRA_MAX_PARALLEL` | `2` | Семафор параллельных процессов zcode |
+| `ORCHESTRA_START_STAGGER_MS` | `20000` | Минимальный интервал между стартами задач (мс): стартовый burst zcode — пик памяти, на слабом хосте разносите старты; 0 = без разноса |
 | `ORCHESTRA_ACCOUNTS` | `[{"name":"main",...}]` | JSON-массив аккаунтов: `[{"name":"main","credentialsFile":null,"providerConfigFile":null,"model":"account:zai-start-plan/GLM-5.3-Flash"}]`. `credentialsFile`/`providerConfigFile` — абсолютные пути; если заданы, при спавне ребёнку подставляются `ZCODE_CLI_CREDENTIALS_FILE` / `ZCODE_PERSONAL_PROVIDER_CONFIG_FILE` (изоляция аккаунтов). Дефолт — один аккаунт `main` с общим `~/.zcode`. |
 | `ORCHESTRA_ZCODE_BIN` | `zcode` | Бинарник zcode CLI |
 | `ORCHESTRA_WORKDIR_ROOT` | `/workspace` | База для относительных workdir |

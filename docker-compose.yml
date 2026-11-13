@@ -20,6 +20,6 @@ services:
       NODE_OPTIONS: --max-old-space-size=224
     mem_limit: 1g
     # burst (старт рантайма, каталог с CDN) уходит в host swap, а не в OOM-килл
-    memswap_limit: 1536m
+    memswap_limit: 2048m
     restart: unless-stopped
     env_file: .env

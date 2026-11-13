@@ -84,6 +84,10 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function errMsg(e: unknown): string {
   if (e instanceof Error) return e.message;
   return String(e);
@@ -227,6 +231,8 @@ export class Runner {
   private readonly jobsPath: string;
   private queue: string[] = [];
   private active = 0;
+  /** Timestamp последнего старта задачи (для разнесения стартовых пиков памяти) */
+  private lastStartAt = 0;
   private persistChain: Promise<void> = Promise.resolve();
 
   constructor(config: OrchestraConfig) {
@@ -401,6 +407,17 @@ export class Runner {
     rec.status = "running";
     rec.startedAt = nowIso();
     this.schedulePersist();
+
+    // разнесение стартов: пик памяти у zcode — первые секунды (каталог с CDN + разогрев);
+    // одновременный старт нескольких рантаймов на слабом хосте = OOM-килл
+    const stagger = this.config.startStaggerMs;
+    if (stagger > 0) {
+      const sinceLast = Date.now() - this.lastStartAt;
+      if (this.lastStartAt > 0 && sinceLast < stagger) {
+        await sleep(stagger - sinceLast);
+      }
+      this.lastStartAt = Date.now();
+    }
 
     let cwd: string;
     try {

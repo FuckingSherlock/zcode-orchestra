@@ -429,15 +429,14 @@ export async function runPipeline(opts: PipelineOptions): Promise<ClaimOutcome> 
   // 4. клейм
   let claim: ClaimOutcome["claim"];
   if (action === "claim") {
-    const target = opts.planId
-      ? plans.find((p) => p.planId === opts.planId)
-      : plans[0];
-    if (!target && opts.planId) {
-      return { ...base, ok: false, plans, error: `план «${opts.planId}» не найден в preview` };
-    }
+    const explicit = opts.planId ? plans.find((p) => p.planId === opts.planId) : undefined;
+    // явный plan_id клеймим даже без наличия в preview: десктоп-клиент берёт его
+    // с карточки активностей (marketing/touch), а preview перечисляет не всё
+    const target: ActivityPlan | undefined = explicit ?? (opts.planId ? { planId: opts.planId, name: opts.planId, priority: 0, grants: [] } : plans[0]);
     if (!target) {
       claim = { planId: "", result: "denied", message: "нет доступных активностей (preview пуст)" };
     } else {
+      if (!explicit) log(`[claim] план ${target.planId} отсутствует в preview — пробуем напрямую (как десктоп с карточки)`);
       const mintAttempts = opts.mintAttempts ?? 3;
       const claimAttempts = opts.claimAttempts ?? 2;
       let lastAttempt: ClaimAttempt | undefined;

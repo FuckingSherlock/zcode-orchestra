@@ -9,6 +9,7 @@
 // Секрет шифрования кредов общий (ZCODE_CREDENTIAL_SECRET_FILE контейнера).
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import type { OrchestraConfig, UserConfig } from "./config.js";
 import { log } from "./logger.js";
@@ -43,7 +44,9 @@ export class AccountManager {
 
   authorized(config: OrchestraConfig, name: string): boolean {
     try {
-      const p = this.credentialsPath(config, name);
+      // рантаймный аккаунт — свои креды; статический — общий ~/.zcode (credentialsFile может быть null)
+      const acc = config.accounts.find((a) => a.name === name);
+      const p = acc?.credentialsFile ?? join(homedir(), ".zcode", "v2", "credentials.json");
       return existsSync(p) && readFileSync(p, "utf8").trim().length > 10;
     } catch {
       return false;

@@ -170,11 +170,11 @@ export class NotifyBinder {
     if (user === undefined) return; // чужой чат — не наш клиент
     const text = cmd.text.trim().toLowerCase();
     try {
-      if (/^\/(status|статус)/.test(text)) {
+      if (/^\/(status|статус|account_list|accounts)/.test(text)) {
         const body = await accountsStatusText(this.config, user, this.accounts, this.scheduler);
         await notify(cmd.chatId, body);
       } else {
-        await notify(cmd.chatId, "Бот понимает:\n• одноразовый код привязки (notify_code)\n• /status — статус аккаунтов");
+        await notify(cmd.chatId, "Бот понимает:\n• /status — статус аккаунтов\n• одноразовый код привязки (выдаёт notify_code)");
       }
       await workerAck(cmd);
       log(`notify-bind: команда от chat ${cmd.chatId} (${user.name}): ${cmd.text.slice(0, 40)} — обработана`);

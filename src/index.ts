@@ -12,7 +12,7 @@ import { registerTools } from "./tools.js";
 import { log } from "./logger.js";
 
 const NAME = "zcode-orchestra";
-const VERSION = "1.3.1";
+const VERSION = "1.3.2";
 const BODY_LIMIT = 10 * 1024 * 1024; // 10 МБ на JSON-RPC запрос
 
 function createMcpServer(config: OrchestraConfig, runner: Runner, user: UserConfig, accounts: AccountManager, binder: NotifyBinder, scheduler: ClaimScheduler): McpServer {

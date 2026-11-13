@@ -13,7 +13,10 @@ import { claimBrokenText, claimFailText, claimSuccessText, notify } from "./noti
 import { log } from "./logger.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const GENERIC_BACKOFF_MS = 10 * 60 * 1000; // лестница попыток: попытка — неудача — 10 мин
+const MAX_ATTEMPTS = 4;                    // максимум попыток клейма на план за цикл
 const DISCOVERY_ERROR_NOTIFY_GAP_MS = 6 * 60 * 60 * 1000; // не спамим про сломанный discovery чаще 1 раза в 6ч
+const GATE_LOG_GAP_MS = 6 * 60 * 60 * 1000; // «до окна раздач» — не чаще раза в 6ч
 
 interface PlanState {
   result: "claimed" | "denied" | "error";
@@ -39,21 +42,30 @@ function emptyAccountState(): AccountClaimState {
   return { plans: {} };
 }
 
-/** Стоит ли снова пытаться клеймить этот план. */
+/**
+ * Стоит ли снова пытаться клеймить этот план.
+ * Лестница generic-отказов: до MAX_ATTEMPTS попыток с GENERIC_BACKOFF_MS паузой,
+ * дальше — тишина до нового цикла (ends_at прошёл) или сутки, если ends_at нет.
+ */
 function shouldAttempt(s: PlanState | undefined, now: number): boolean {
   if (!s) return true;
   if (s.endsAt !== undefined && now < s.endsAt * 1000) return false; // грант активен / слот занят до endsAt
   if (s.result === "claimed") {
-    // успех без endsAt — суточный план без данных: сутки не трогаем
-    return now - s.lastAttemptAt >= DAY_MS;
+    // endsAt прошёл (проверено выше) → новый цикл плана; без endsAt — сутки тишины
+    return s.endsAt !== undefined || now - s.lastAttemptAt >= DAY_MS;
   }
-  const backoff = s.code === 1002 ? 7 * DAY_MS : s.code === 1005 ? 6 * 60 * 60 * 1000 : 30 * 60 * 1000;
-  return now - s.lastAttemptAt >= backoff;
+  if (s.code === 1002) return now - s.lastAttemptAt >= 7 * DAY_MS; // кампания умерла — новый план_id придёт сам
+  if (s.code === 1005) return s.endsAt === undefined && now - s.lastAttemptAt >= 6 * 60 * 60 * 1000; // без NextAt — 6ч
+  if (s.attempts >= MAX_ATTEMPTS) {
+    return s.endsAt === undefined && now - s.lastAttemptAt >= DAY_MS;
+  }
+  return now - s.lastAttemptAt >= GENERIC_BACKOFF_MS;
 }
 
 export class ClaimScheduler {
   private timer: NodeJS.Timeout | null = null;
   private ticking = false;
+  private lastGateLogAt = 0;
   private readonly statePath: string;
   private state: ClaimState = { accounts: {} };
 
@@ -86,6 +98,24 @@ export class ClaimScheduler {
     this.timer = setTimeout(() => void this.runTick(), this.config.claimIntervalMs);
   }
 
+  /**
+   * Окно раздач по МСК: раздача начинается после claimAfterHourMsk (14:00),
+   * в пятницу — после claimFridayAfterHourMsk (17:00). До этого тики пропускаются.
+   */
+  private claimWindowOpen(): boolean {
+    const parts = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Europe/Moscow",
+      hour: "2-digit",
+      hourCycle: "h23",
+      weekday: "short",
+    }).formatToParts(new Date());
+    const hour = Number(parts.find((p) => p.type === "hour")?.value);
+    const weekday = parts.find((p) => p.type === "weekday")?.value;
+    if (!Number.isFinite(hour)) return true; // не смогли определить час — лучше лишняя попытка, чем пропуск окна
+    const gate = weekday === "Fri" ? this.config.claimFridayAfterHourMsk : this.config.claimAfterHourMsk;
+    return hour >= gate;
+  }
+
   private async runTick(): Promise<void> {
     try {
       await this.tick();
@@ -100,6 +130,14 @@ export class ClaimScheduler {
     if (this.ticking) return;
     this.ticking = true;
     try {
+      if (!this.claimWindowOpen()) {
+        const now = Date.now();
+        if (now - this.lastGateLogAt > GATE_LOG_GAP_MS) {
+          this.lastGateLogAt = now;
+          log(`автоклейм: до окна раздач (${this.config.claimAfterHourMsk}:00 МСК${this.config.claimFridayAfterHourMsk !== this.config.claimAfterHourMsk ? `, пт с ${this.config.claimFridayAfterHourMsk}:00` : ""}) — тик пропущен`);
+        }
+        return;
+      }
       for (const acc of this.config.accounts) {
         // claim-child получает свои 512МБ heap — не стартуем под полной нагрузкой
         if (this.runner.activeCount >= this.config.maxParallel) {
@@ -148,9 +186,14 @@ export class ClaimScheduler {
     const names = new Map<string, string>(preview.map((p) => [p.planId, p.name]));
     const candidates = new Set<string>([...preview.map((p) => p.planId), ...(outcome.campaignPlanIds ?? [])]);
 
-    // 3. фильтр по state (suppress/бэкофф)
+    // 3. фильтр по state (suppress/бэкофф); ends_at прошёл → новый цикл плана, лестница попыток заново
     const now = Date.now();
-    const due = [...candidates].filter((id) => shouldAttempt(accState.plans[id], now));
+    const due: string[] = [];
+    for (const id of candidates) {
+      const s = accState.plans[id];
+      if (s && s.endsAt !== undefined && now >= s.endsAt * 1000) s.attempts = 0;
+      if (shouldAttempt(s, now)) due.push(id);
+    }
     log(
       `автоклейм (${acc.name}): preview=${preview.length}, кампаний=${outcome.campaignPlanIds?.length ?? 0}, ` +
         `кандидатов=${candidates.size}, к клейму=${due.length ? due.join(",") : 0}`,
@@ -186,8 +229,10 @@ export class ClaimScheduler {
     if (rec.result === "claimed" && claimRun.outcome?.claim) {
       const cl = claimRun.outcome.claim;
       await notify(chat, claimSuccessText(acc.name, cl.planName ?? names.get(planId) ?? planId, planId, cl.grants ?? [], cl.endsAt, cl.startsAt));
+    } else if (rec.attempts >= MAX_ATTEMPTS) {
+      await notify(chat, `⛔ Автоклейм сдался (акк ${acc.name})\n${planId}\n${rec.lastMessage ?? "(без сообщения)"}\n${MAX_ATTEMPTS} попыток исчерпаны — жду следующего окна.`);
     } else {
-      await notify(chat, claimFailText(acc.name, planId, rec.result === "denied" ? "denied" : "error", rec.lastMessage ?? "(без сообщения)"));
+      await notify(chat, claimFailText(acc.name, planId, rec.result === "denied" ? "denied" : "error", `${rec.lastMessage ?? "(без сообщения)"} (попытка ${rec.attempts}/${MAX_ATTEMPTS})`));
     }
   }
 

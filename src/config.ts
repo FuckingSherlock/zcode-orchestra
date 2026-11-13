@@ -46,6 +46,10 @@ export interface OrchestraConfig {
   claimAuto: boolean;
   /** Интервал тика автоклейма (мс) */
   claimIntervalMs: number;
+  /** Час МСК, с которого начинаются тики автоклейма (раздачи появляются после 14:00) */
+  claimAfterHourMsk: number;
+  /** Час МСК для пятницы (weekend-раздача появляется после 17:00) */
+  claimFridayAfterHourMsk: number;
   /** Бинарник zcode CLI */
   zcodeBin: string;
   /** База для относительных workdir */
@@ -66,6 +70,8 @@ type FileConfig = Partial<{
   users: unknown;
   claimAuto: boolean;
   claimIntervalMs: number;
+  claimAfterHourMsk: number;
+  claimFridayAfterHourMsk: number;
   zcodeBin: string;
   workdirRoot: string;
   dataDir: string;
@@ -273,13 +279,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): OrchestraConfi
 
   const claimAuto = asBool(env.ORCHESTRA_CLAIM_AUTO ?? file.claimAuto, "ORCHESTRA_CLAIM_AUTO", true);
   const claimIntervalMs = asInterval(env.ORCHESTRA_CLAIM_INTERVAL_MS ?? file.claimIntervalMs, "ORCHESTRA_CLAIM_INTERVAL_MS", 600_000, 60_000, 3_600_000);
+  const claimAfterHourMsk = asInterval(env.ORCHESTRA_CLAIM_AFTER_MSK ?? file.claimAfterHourMsk, "ORCHESTRA_CLAIM_AFTER_MSK", 14, 0, 23);
+  const claimFridayAfterHourMsk = asInterval(env.ORCHESTRA_CLAIM_FRIDAY_AFTER_MSK ?? file.claimFridayAfterHourMsk, "ORCHESTRA_CLAIM_FRIDAY_AFTER_MSK", 17, 0, 23);
 
   // 4) фатальная валидация http-режима
   if (transport === "http" && token.trim() === "") {
     fail("ORCHESTRA_TOKEN пуст — в http-режиме bearer-токен обязателен (либо переключите ORCHESTRA_TRANSPORT=stdio)");
   }
 
-  return { token, port, transport, maxParallel, startStaggerMs, accounts, users, claimAuto, claimIntervalMs, zcodeBin, workdirRoot, dataDir };
+  return { token, port, transport, maxParallel, startStaggerMs, accounts, users, claimAuto, claimIntervalMs, claimAfterHourMsk, claimFridayAfterHourMsk, zcodeBin, workdirRoot, dataDir };
 }
 
 /** Поиск аккаунта по имени; пусто/undefined → «main». Неизвестное имя — ошибка. */

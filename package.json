@@ -1,0 +1,23 @@
+{
+  "name": "zcode-orchestra",
+  "version": "1.0.0",
+  "description": "MCP-сервер-оркестратор: параллельные брифованные сессии zcode CLI для внешних AI-агентов",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "typescript": "^5.9.3"
+  }
+}

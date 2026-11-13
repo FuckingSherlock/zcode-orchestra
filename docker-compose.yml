@@ -1,0 +1,17 @@
+services:
+  zcode-orchestra:
+    build: .
+    container_name: zcode-orchestra
+    ports:
+      # хост:контейнер — обе стороны из ORCHESTRA_PORT (.env)
+      - "${ORCHESTRA_PORT:-8787}:${ORCHESTRA_PORT:-8787}"
+    volumes:
+      # логин/креды z.ai сохраняются между рестартами (zcode login внутри контейнера)
+      - ./.data/zcode:/root/.zcode
+      # рабочие папки сессий
+      - ./.data/workspace:/workspace
+      # журнал задач (jobs.json + jobs/*.log)
+      - ./data:/app/data
+    mem_limit: 1g
+    restart: unless-stopped
+    env_file: .env
